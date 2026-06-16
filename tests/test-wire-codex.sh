@@ -5,6 +5,13 @@
 # value (not array-mergeable). If a non-nudge `notify` already exists, the
 # installer MUST NOT overwrite it. Instead it prints clobber guidance and
 # exits 0, leaving the file byte-identical.
+#
+# Additional invariant (teardown-resilience): Codex runs `notify` fire-and-
+# forget and tears down the process tree shortly after the turn (especially
+# `codex exec`), killing a still-running synchronous curl. The installer
+# must therefore emit the `notify` line in a DETACHED form
+# (nohup + backgrounded subshell), and the same detached form must appear
+# in the printed manual-merge guidance for the clobber-refusal case.
 
 set -uo pipefail
 
@@ -27,6 +34,61 @@ trap cleanup EXIT
 
 pass() { echo "  PASS: $*"; }
 fail() { echo "  FAIL: $*" >&2; FAILED=1; }
+
+# Detach-wrapper assertion. Given a single-line string $1 (the notify line) and
+# a context label $2 (for the failure message), verify the line contains every
+# substring that proves it is the teardown-resilient detached form:
+#   - `nohup`                  → survives parent SIGHUP / teardown
+#   - `( ` and ` & )`          → backgrounded subshell wrapper
+#   - `>/dev/null 2>&1`        → silences output so curl can detach cleanly
+#   - `notify-codex.sh`        → still invokes the nudge wrapper
+#   - `"$1"`                   → still forwards Codex's JSON payload arg
+#   - `/.nudge/notify-codex.sh` → absolute path under HOME/.nudge
+# All checks use literal-string grep (-F) and operate on a single line.
+assert_detach_line() {
+  local line="$1"
+  local ctx="$2"
+  local missing=0
+
+  if ! grep -F 'nohup' <<<"${line}" >/dev/null; then
+    fail "${ctx}: notify line missing 'nohup' (detach wrapper required)"
+    missing=1
+  fi
+  if ! grep -F '( ' <<<"${line}" >/dev/null; then
+    fail "${ctx}: notify line missing '( ' opening subshell"
+    missing=1
+  fi
+  if ! grep -F ' & )' <<<"${line}" >/dev/null; then
+    fail "${ctx}: notify line missing ' & )' backgrounded subshell close"
+    missing=1
+  fi
+  if ! grep -F '>/dev/null 2>&1' <<<"${line}" >/dev/null; then
+    fail "${ctx}: notify line missing '>/dev/null 2>&1' redirect"
+    missing=1
+  fi
+  if ! grep -F 'notify-codex.sh' <<<"${line}" >/dev/null; then
+    fail "${ctx}: notify line missing 'notify-codex.sh' wrapper reference"
+    missing=1
+  fi
+  # Payload arg passing — install.sh wires Codex's JSON payload as $1 into the
+  # bash -c command. Depending on the emit path the bytes around $1 are either
+  # `\"$1\"` (create-when-missing path + printed manual line — install.sh's
+  # shell-literal backslash escapes survive) OR `"$1"` (no-notify-append path,
+  # because awk -v assignment strips the backslashes when it interpolates the
+  # variable). Both forms are valid — accept either, but require `$1` quoted.
+  if ! grep -E '\\?"\$1\\?"' <<<"${line}" >/dev/null; then
+    fail "${ctx}: notify line missing quoted \$1 payload placeholder (expected \"\$1\" or \\"\$1\\")"
+    missing=1
+  fi
+  if ! grep -F '/.nudge/notify-codex.sh' <<<"${line}" >/dev/null; then
+    fail "${ctx}: notify line missing absolute '/.nudge/notify-codex.sh' path"
+    missing=1
+  fi
+
+  if [[ "${missing}" -eq 0 ]]; then
+    pass "${ctx}: detached notify wrapper present (nohup + ( ... & ) + redirect + payload)"
+  fi
+}
 
 make_fixture_home() {
   local d
@@ -98,6 +160,18 @@ scenario_clobber_refusal() {
     return
   fi
   pass "clobber guidance printed"
+
+  # NEW: the printed manual-merge snippet must itself be the detached form,
+  # so users who paste it get teardown-resilient wiring (not the legacy
+  # synchronous form that loses curl mid-flight under codex exec).
+  local manual_line
+  manual_line="$(grep -F 'notify-codex.sh' <<<"${out}" | grep -F 'notify' | head -n1)"
+  if [[ -z "${manual_line}" ]]; then
+    fail "could not extract printed manual notify line from guidance output"
+    echo "----- output -----" >&2; echo "${out}" >&2; echo "------------------" >&2
+    return
+  fi
+  assert_detach_line "${manual_line}" "scenario A printed guidance"
 }
 
 # ---------------------------------------------------------------------------
@@ -160,6 +234,17 @@ scenario_set_when_absent() {
     return
   fi
   pass "pre-existing [model] section preserved"
+
+  # NEW: the generated notify line must be the detached form (teardown-
+  # resilient under codex exec). Operate on the single notify line, not the
+  # whole file, so the assertions are unambiguous.
+  local notify_line
+  notify_line="$(grep -E '^notify\s*=' "${fixture_file}" | head -n1)"
+  if [[ -z "${notify_line}" ]]; then
+    fail "could not extract generated notify line from config.toml"
+    return
+  fi
+  assert_detach_line "${notify_line}" "scenario B generated notify line"
 }
 
 # ---------------------------------------------------------------------------
@@ -242,6 +327,15 @@ scenario_create_when_missing() {
     return
   fi
   pass "config.toml created with nudge notify"
+
+  # NEW: the created notify line must be the detached form.
+  local notify_line
+  notify_line="$(grep -E '^notify\s*=' "${fixture_file}" | head -n1)"
+  if [[ -z "${notify_line}" ]]; then
+    fail "could not extract created notify line from config.toml"
+    return
+  fi
+  assert_detach_line "${notify_line}" "scenario D created notify line"
 }
 
 # ---------------------------------------------------------------------------

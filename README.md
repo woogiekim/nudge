@@ -108,6 +108,15 @@ byte-identical. To wire Codex while keeping another tool's notify, replace the
 existing `notify` line with the printed one or chain the other tool's command
 into the wrapper yourself.
 
+**Codex detach (why the wired notify looks unusual).** The generated `notify`
+line wraps the wrapper in a backgrounded subshell with `nohup`
+(`( nohup ~/.nudge/notify-codex.sh "$1" >/dev/null 2>&1 & )`). Codex runs
+`notify` **fire-and-forget** and tears down the process tree right after the
+turn (especially under `codex exec`), so a plain synchronous `curl` would be
+killed mid-flight and the push would never reach ntfy. Detaching the wrapper
+lets the POST complete after Codex exits. Claude Code and Gemini CLI are not
+affected — their hosts wait for the hook to finish before tearing down.
+
 **Gemini safety.** If `~/.gemini` does not exist, `--wire-gemini` (and
 `--wire-all`) skip with a notice — they will not create the directory.
 
