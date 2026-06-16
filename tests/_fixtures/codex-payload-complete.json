@@ -1,0 +1,9 @@
+{
+  "type": "agent-turn-complete",
+  "thread-id": "thr-12345",
+  "turn-id": "turn-7",
+  "cwd": "__CWD_PLACEHOLDER__",
+  "client": "codex-cli",
+  "input-messages": ["Fix the login bug in auth.py", "follow up"],
+  "last-assistant-message": "Done — pushed a fix."
+}

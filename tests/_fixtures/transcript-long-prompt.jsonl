@@ -1,0 +1,2 @@
+{"type":"system","message":"session started"}
+{"type":"last-prompt","lastPrompt":"This is a very long prompt that should absolutely be truncated to about seventy characters and not show the entire body of the question"}

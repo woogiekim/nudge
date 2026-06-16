@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.nudge/notify.sh 'Gemini CLI' 'Waiting for input or approval' high"
+            "command": "~/.nudge/notify-gemini.sh"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.nudge/notify.sh 'Gemini CLI' 'Task complete' default"
+            "command": "~/.nudge/notify-gemini.sh"
           }
         ]
       }

@@ -1,0 +1,4 @@
+{"type":"system","message":"session started"}
+{"type":"last-prompt","lastPrompt":"Refactor the auth flow to support OAuth"}
+{"type":"ai-title","aiTitle":"OAuth refactor"}
+{"type":"assistant","content":"working on it"}

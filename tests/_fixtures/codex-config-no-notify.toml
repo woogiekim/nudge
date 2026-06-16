@@ -1,0 +1,7 @@
+# Pre-existing user config WITHOUT a `notify` key.
+[model]
+provider = "openai"
+name = "gpt-4o"
+
+[tui]
+notifications = ["agent-turn-complete"]

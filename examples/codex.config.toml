@@ -1,13 +1,21 @@
 # Merge this into ~/.codex/config.toml
-
-# `notify` runs the given command on notification events.
-# Codex appends a JSON payload as the final argument to the command.
 #
-# NOTE (Unverified): the exact JSON schema/fields differ by Codex version.
-# This minimal setup ignores the payload and sends a fixed message. To send
-# event-specific text, wrap notify.sh in a script that parses the JSON (jq).
-notify = ["bash", "-c", "~/.nudge/notify.sh 'Codex CLI' 'Codex needs attention' high"]
+# `notify` is a SINGLE value in config.toml — not array-mergeable. If your file
+# already has a `notify = [...]` for another tool, REPLACE the line entirely
+# (run `bash install.sh --wire-codex` to get a refusal + the exact line to
+# paste manually), or wrap the other tool's program into the same chain.
+#
+# The wrapper reads Codex's JSON payload from ARGV[1] (set by Codex itself),
+# gates on type=="agent-turn-complete", and forwards a context-rich message
+# to ~/.nudge/notify.sh.
+#
+# If Codex does not expand `~`, use the absolute path
+# (e.g. /home/you/.nudge/notify-codex.sh).
+
+notify = ["bash", "-c", "~/.nudge/notify-codex.sh \"$1\"", "--"]
 
 [tui]
-# Which events should trigger the notify command above.
-notifications = ["agent-turn-complete", "approval-requested"]
+# Which events trigger the notify command above. Codex emits only
+# "agent-turn-complete" today; the wrapper itself gates by type, so other
+# values here are harmless.
+notifications = ["agent-turn-complete"]

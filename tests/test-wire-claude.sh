@@ -116,16 +116,16 @@ scenario_a_absent_file() {
   fi
   pass "settings.json parses as valid JSON"
 
-  local expected_abs="${home_dir}/.nudge/notify.sh"
-  if ! grep -F "${expected_abs}" "${fixture_file}" >/dev/null 2>&1; then
-    if ! grep -F "/.nudge/notify.sh" "${fixture_file}" >/dev/null 2>&1; then
-      fail "settings.json missing /.nudge/notify.sh command path"
-      return
-    fi
-    fail "settings.json missing absolute-form path ${expected_abs}"
+  local expected_prefix="${home_dir}/.nudge/notify"
+  if ! grep -F "${expected_prefix}" "${fixture_file}" >/dev/null 2>&1; then
+    fail "settings.json missing absolute-form path ${expected_prefix}*.sh"
     return
   fi
-  pass "settings.json contains absolute-form notify.sh path"
+  if ! grep -E "/\.nudge/notify(-claude)?\.sh" "${fixture_file}" >/dev/null 2>&1; then
+    fail "settings.json missing /.nudge/notify.sh or /.nudge/notify-claude.sh path"
+    return
+  fi
+  pass "settings.json contains absolute-form notify(.sh|-claude.sh) path"
 
   if grep -F "~/.nudge/notify.sh" "${fixture_file}" >/dev/null 2>&1; then
     fail "settings.json contains forbidden tilde-form '~/.nudge/notify.sh'"
@@ -137,12 +137,12 @@ scenario_a_absent_file() {
     local stop_cmd notif_cmd
     stop_cmd="$(jq -r '.hooks.Stop[0].hooks[0].command // ""' "${fixture_file}")"
     notif_cmd="$(jq -r '.hooks.Notification[0].hooks[0].command // ""' "${fixture_file}")"
-    if [[ "${stop_cmd}" != *"/.nudge/notify.sh"* ]]; then
-      fail ".hooks.Stop[0].hooks[0].command does not reference /.nudge/notify.sh"
+    if ! [[ "${stop_cmd}" =~ /\.nudge/notify(-claude)?\.sh ]]; then
+      fail ".hooks.Stop[0].hooks[0].command does not reference /.nudge/notify.sh or notify-claude.sh: ${stop_cmd}"
       return
     fi
-    if [[ "${notif_cmd}" != *"/.nudge/notify.sh"* ]]; then
-      fail ".hooks.Notification[0].hooks[0].command does not reference /.nudge/notify.sh"
+    if ! [[ "${notif_cmd}" =~ /\.nudge/notify(-claude)?\.sh ]]; then
+      fail ".hooks.Notification[0].hooks[0].command does not reference /.nudge/notify.sh or notify-claude.sh: ${notif_cmd}"
       return
     fi
     pass "both .hooks.Stop and .hooks.Notification reference notify.sh"
@@ -189,7 +189,7 @@ JSON_EOF
   fi
   pass "pre-existing mnemos Stop entry is preserved"
 
-  if ! grep -F "/.nudge/notify.sh" "${fixture_file}" >/dev/null 2>&1; then
+  if ! grep -E "/.nudge/notify(-claude)?.sh" "${fixture_file}" >/dev/null 2>&1; then
     fail "nudge Stop entry was not appended"
     return
   fi
@@ -205,7 +205,7 @@ JSON_EOF
   pass "timestamped backup file written (${#backups[@]} file(s))"
 
   local backup_path="${backups[0]}"
-  if grep -F "/.nudge/notify.sh" "${backup_path}" >/dev/null 2>&1; then
+  if grep -E "/.nudge/notify(-claude)?.sh" "${backup_path}" >/dev/null 2>&1; then
     fail "backup file contains nudge entry — backup taken AFTER edit, not before"
     return
   fi
@@ -248,9 +248,9 @@ scenario_c_idempotent_rerun() {
   fi
 
   local count_before
-  count_before="$(grep -c -F "/.nudge/notify.sh" "${fixture_file}" || true)"
+  count_before="$(grep -c -E "/.nudge/notify(-claude)?.sh" "${fixture_file}" || true)"
   if [[ "${count_before}" -lt 1 ]]; then
-    fail "first run did not produce any /.nudge/notify.sh entry"
+    fail "first run did not produce any /.nudge/notify(-claude).sh entry"
     return
   fi
   pass "first run wired ${count_before} nudge command(s)"
@@ -268,7 +268,7 @@ scenario_c_idempotent_rerun() {
   fi
 
   local count_after
-  count_after="$(grep -c -F "/.nudge/notify.sh" "${fixture_file}" || true)"
+  count_after="$(grep -c -E "/.nudge/notify(-claude)?.sh" "${fixture_file}" || true)"
   if [[ "${count_after}" -ne "${count_before}" ]]; then
     fail "second run added a duplicate (before=${count_before}, after=${count_after})"
     return
