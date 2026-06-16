@@ -531,7 +531,7 @@ PERM_EOF
   local publish_cmd="${NUDGE_PUBLISH_CMD:-${ntfy_cmd} publish}"
   echo "==> Publishing self-test message to topic '${topic}'"
   # shellcheck disable=SC2086
-  ${publish_cmd} "${topic}" "nudge receiver installed" >/dev/null 2>&1 || true
+  ${publish_cmd} --no-cache "${topic}" "nudge receiver installed" >/dev/null 2>&1 || true
   echo "    Check Notification Center for the banner in a few seconds."
 
   cat <<DUP_EOF

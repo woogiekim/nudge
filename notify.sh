@@ -47,5 +47,6 @@ curl -s \
   -H "Title: ${TITLE}" \
   -H "Priority: ${PRIORITY}" \
   -H "Tags: robot" \
+  -H "Cache: no" \
   -d "${MESSAGE}" \
   "${NTFY_SERVER}/${NTFY_TOPIC}" > /dev/null 2>&1 || true
