@@ -60,7 +60,7 @@ git_branch_for() {
 #   $6 priority      default|high|urgent
 #
 # Builds:
-#   TITLE = "🤖 {tool} · {project}"
+#   TITLE = "{tool} · {project}"  (ntfy's `Tags: robot` adds the 🤖 icon)
 #   MESSAGE line2 = "{event}" or "{event} · {branch}"
 #   MESSAGE line3 = "💬 {question}"   (omitted if question empty)
 # Then calls notify.sh "{TITLE}" "{MESSAGE}" "{priority}".
@@ -74,7 +74,10 @@ format_and_send() {
   local question_raw="${5:-}"
   local priority="${6:-default}"
 
-  local title="🤖 ${tool} · ${project}"
+  # NOTE: do NOT prefix an emoji here. notify.sh sends `Tags: robot`, which
+  # ntfy already renders as a 🤖 in front of the title. Adding a literal emoji
+  # too produced a doubled "🤖🤖" in the notification.
+  local title="${tool} · ${project}"
 
   local line2="${event}"
   if [[ -n "${branch}" ]]; then
