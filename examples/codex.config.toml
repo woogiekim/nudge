@@ -11,8 +11,13 @@
 #
 # If Codex does not expand `~`, use the absolute path
 # (e.g. /home/you/.nudge/notify-codex.sh).
+#
+# Detached wiring: Codex runs `notify` fire-and-forget and tears down the
+# process tree right after the turn (especially `codex exec`). A plain
+# synchronous curl inside the wrapper would be killed mid-flight, so we wrap
+# the call in a backgrounded subshell + nohup to let the POST complete.
 
-notify = ["bash", "-c", "~/.nudge/notify-codex.sh \"$1\"", "--"]
+notify = ["bash", "-c", "( nohup ~/.nudge/notify-codex.sh \"$1\" >/dev/null 2>&1 & )", "--"]
 
 [tui]
 # Which events trigger the notify command above. Codex emits only
