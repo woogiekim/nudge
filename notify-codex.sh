@@ -23,7 +23,7 @@ fi
 
 if ! declare -f format_and_send >/dev/null 2>&1; then
   format_and_send() {
-    local title="🤖 ${1:-Codex CLI} · ${2:-?}"
+    local title="${1:-Codex CLI} · ${2:-?}"
     local notify="${NUDGE_NOTIFY_CMD:-${HOME}/.nudge/notify.sh}"
     [[ -f "${notify}" ]] && bash "${notify}" "${title}" "${3:-Done}" "${6:-default}" 2>/dev/null || true
   }
