@@ -52,6 +52,25 @@ bash test.sh
 `install.sh` deliberately does **not** edit your AI tools' config files, so
 your existing settings are never overwritten. Tool wiring is manual (below).
 
+### Opt-in: auto-wire Claude Code
+
+If you trust nudge to merge its hooks directly into your Claude Code
+settings, run the installer with `--wire-claude`:
+
+```bash
+bash install.sh --wire-claude
+```
+
+This performs a structure-aware `jq` merge into `~/.claude/settings.json`,
+writing a timestamped backup (`settings.json.bak.YYYYMMDDHHMMSS`) before
+any edit. The merge is **idempotent** — re-running it is a no-op — and
+preserves any existing hooks (e.g. mnemos / agent-crew). If `jq` is not
+installed or the file is not valid JSON, the installer prints the
+manual snippet and exits without touching anything.
+
+Claude Code reads `settings.json` at session start, so **restart your
+Claude Code session** after wiring for the hooks to load.
+
 ## 🔌 Wiring up each tool
 
 Each tool stores config differently, so the trigger differs — but all of them
