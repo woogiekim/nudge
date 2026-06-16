@@ -1,0 +1,5 @@
+{
+  "type": "agent-turn-complete",
+  "thread-id": "thr-99",
+  "input-messages": ["Hello from old Codex"]
+}

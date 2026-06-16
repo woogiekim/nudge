@@ -1,0 +1,5 @@
+# Pre-existing user config with a non-nudge `notify` (Computer Use scenario).
+notify = ["/usr/local/bin/some-other-notifier", "--mode", "computer-use"]
+
+[tui]
+notifications = ["agent-turn-complete"]

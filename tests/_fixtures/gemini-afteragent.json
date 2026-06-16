@@ -1,0 +1,8 @@
+{
+  "cwd": "__CWD_PLACEHOLDER__",
+  "transcript_path": "/dev/null",
+  "session_id": "sess-9",
+  "hook_event_name": "AfterAgent",
+  "prompt": "Write a unit test for the parser",
+  "prompt_response": "Sure, here it is."
+}

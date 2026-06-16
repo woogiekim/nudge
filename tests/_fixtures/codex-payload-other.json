@@ -1,0 +1,6 @@
+{
+  "type": "some-other-event",
+  "thread-id": "thr-12345",
+  "cwd": "__CWD_PLACEHOLDER__",
+  "input-messages": ["irrelevant"]
+}

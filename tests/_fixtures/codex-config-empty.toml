@@ -1,0 +1,3 @@
+# Empty-ish config — only a [tui] section.
+[tui]
+notifications = ["agent-turn-complete"]

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.nudge/notify.sh 'Claude Code' 'Response complete' default"
+            "command": "~/.nudge/notify-claude.sh"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.nudge/notify.sh 'Claude Code' 'Waiting for your input' high"
+            "command": "~/.nudge/notify-claude.sh"
           }
         ]
       }
