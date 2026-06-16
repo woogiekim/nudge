@@ -6,10 +6,12 @@
 # By default, install.sh leaves AI tool config files untouched.
 #
 # Opt-in wiring flags:
-#   --wire-claude  : jq-merge nudge hooks into ~/.claude/settings.json
-#   --wire-codex   : set ~/.codex/config.toml `notify` (REFUSES to clobber)
-#   --wire-gemini  : jq-merge nudge hooks into ~/.gemini/settings.json
-#   --wire-all     : run every available wiring
+#   --wire-claude            : jq-merge nudge hooks into ~/.claude/settings.json
+#   --wire-codex             : set ~/.codex/config.toml `notify` (REFUSES to clobber)
+#   --wire-gemini            : jq-merge nudge hooks into ~/.gemini/settings.json
+#   --wire-all               : run every available wiring
+#   --setup-receiver-macos   : provision the macOS headless ntfy receiver
+#                              (launchd subscriber + terminal-notifier)
 #
 # All wirings are idempotent, take timestamped backups before writing,
 # and degrade gracefully (manual snippet) if jq is unavailable.
@@ -23,6 +25,7 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WIRE_CLAUDE=0
 WIRE_CODEX=0
 WIRE_GEMINI=0
+SETUP_RECEIVER_MACOS=0
 for arg in "$@"; do
   case "${arg}" in
     --wire-claude) WIRE_CLAUDE=1 ;;
@@ -33,16 +36,22 @@ for arg in "$@"; do
       WIRE_CODEX=1
       WIRE_GEMINI=1
       ;;
+    --setup-receiver-macos) SETUP_RECEIVER_MACOS=1 ;;
     -h|--help)
       cat <<USAGE
 Usage: install.sh [--wire-claude] [--wire-codex] [--wire-gemini] [--wire-all]
+                  [--setup-receiver-macos]
 
-  --wire-claude    Merge nudge hooks into \${HOME}/.claude/settings.json (requires jq).
-  --wire-codex     Set 'notify' in \${HOME}/.codex/config.toml (refuses to overwrite
-                   a pre-existing non-nudge notify).
-  --wire-gemini    Merge nudge hooks into \${HOME}/.gemini/settings.json (requires jq).
-                   Skipped if ~/.gemini does not exist.
-  --wire-all       Run every available wiring above.
+  --wire-claude              Merge nudge hooks into \${HOME}/.claude/settings.json (requires jq).
+  --wire-codex               Set 'notify' in \${HOME}/.codex/config.toml (refuses to overwrite
+                             a pre-existing non-nudge notify).
+  --wire-gemini              Merge nudge hooks into \${HOME}/.gemini/settings.json (requires jq).
+                             Skipped if ~/.gemini does not exist.
+  --wire-all                 Run every available wiring above.
+  --setup-receiver-macos     macOS only. Provision a headless ntfy receiver
+                             (brew installs ntfy + terminal-notifier, writes a
+                             launchd subscriber plist, publishes a self-test).
+                             Requires NTFY_TOPIC set in ~/.nudge/.env.
 
 Default invocation only copies the nudge files; AI tool configs are left
 untouched.
@@ -51,7 +60,7 @@ USAGE
       ;;
     *)
       echo "install.sh: unknown flag: ${arg}" >&2
-      echo "Usage: install.sh [--wire-claude] [--wire-codex] [--wire-gemini] [--wire-all]" >&2
+      echo "Usage: install.sh [--wire-claude] [--wire-codex] [--wire-gemini] [--wire-all] [--setup-receiver-macos]" >&2
       exit 2
       ;;
   esac
@@ -371,12 +380,172 @@ wire_gemini_settings() {
   echo "${restart_notice}"
 }
 
+# --- macOS headless receiver setup (opt-in) --------------------------------
+# Provisions a launchd-managed `ntfy subscribe` worker that hands incoming
+# messages to ~/.nudge/notify-mac.sh, which posts to Notification Center via
+# terminal-notifier (osascript fallback). NO ntfy GUI app required.
+#
+# All side-effecting commands resolve through override env vars so the test
+# suite can stub every external invocation:
+#   NUDGE_BREW_CMD          default "brew"
+#   NUDGE_LAUNCHCTL_CMD     default "launchctl"
+#   NUDGE_OPEN_CMD          default "open"
+#   NUDGE_TN_CMD            default "terminal-notifier"
+#   NUDGE_NTFY_CMD          default "ntfy"
+#   NUDGE_PUBLISH_CMD       default "${NUDGE_NTFY_CMD} publish"
+#   NUDGE_LAUNCHAGENTS_DIR  default "${HOME}/Library/LaunchAgents"
+setup_receiver_macos() {
+  # 1. Platform guard — first statement, zero side effects on non-Darwin.
+  local platform
+  platform="$(uname -s 2>/dev/null || echo unknown)"
+  if [[ "${platform}" != "Darwin" ]]; then
+    echo "==> setup-receiver-macos: macOS only — skipping (current platform: ${platform})"
+    return 0
+  fi
+
+  # 2. Precondition: NTFY_TOPIC must be set in ~/.nudge/.env (non-empty).
+  local env_file="${INSTALL_DIR}/.env"
+  local topic=""
+  if [[ -f "${env_file}" ]]; then
+    # Extract NTFY_TOPIC without sourcing arbitrary code into our shell.
+    topic="$(grep -E '^[[:space:]]*NTFY_TOPIC[[:space:]]*=' "${env_file}" \
+      | tail -n 1 \
+      | sed -E 's/^[[:space:]]*NTFY_TOPIC[[:space:]]*=[[:space:]]*//' \
+      | sed -E 's/^"(.*)"$/\1/' \
+      | sed -E "s/^'(.*)'\$/\\1/" \
+      || true)"
+  fi
+
+  if [[ -z "${topic}" ]]; then
+    echo "==> setup-receiver-macos: NTFY_TOPIC is not set."
+    echo "    Edit ${env_file} and set NTFY_TOPIC to a unique value first,"
+    echo "    then re-run: bash install.sh --setup-receiver-macos"
+    return 0
+  fi
+
+  # 3. Deps: brew install ntfy + terminal-notifier (idempotent). If brew is
+  # absent, continue only when ntfy is already on PATH.
+  local brew_cmd="${NUDGE_BREW_CMD:-brew}"
+  local ntfy_cmd="${NUDGE_NTFY_CMD:-ntfy}"
+  if command -v "${brew_cmd}" >/dev/null 2>&1; then
+    echo "==> Installing ntfy + terminal-notifier via ${brew_cmd} (idempotent)"
+    "${brew_cmd}" install ntfy terminal-notifier || true
+  else
+    echo "==> ${brew_cmd} not found on PATH."
+    if command -v "${ntfy_cmd}" >/dev/null 2>&1; then
+      echo "    ntfy is already on PATH — continuing without brew."
+    else
+      echo "    Install Homebrew (https://brew.sh) and re-run, or install ntfy manually."
+      return 0
+    fi
+  fi
+
+  # 4. Notifier presence check — installed by the core copy loop above.
+  local notifier="${INSTALL_DIR}/notify-mac.sh"
+  if [[ ! -x "${notifier}" ]]; then
+    echo "==> setup-receiver-macos: ${notifier} is missing or not executable."
+    echo "    Re-run 'bash install.sh' to refresh ${INSTALL_DIR}, then re-try."
+    return 0
+  fi
+
+  # 5. LaunchAgent plist generation (timestamped backup + clean overwrite).
+  local launchagents_dir="${NUDGE_LAUNCHAGENTS_DIR:-${HOME}/Library/LaunchAgents}"
+  mkdir -p "${launchagents_dir}"
+  local plist="${launchagents_dir}/sh.ntfy.subscribe.plist"
+
+  local ntfy_bin
+  ntfy_bin="$(command -v "${ntfy_cmd}" 2>/dev/null || true)"
+  if [[ -z "${ntfy_bin}" ]]; then
+    ntfy_bin="/opt/homebrew/bin/ntfy"
+  fi
+
+  if [[ -f "${plist}" ]]; then
+    local backup_path
+    backup_path="${plist}.bak.$(date +%Y%m%d%H%M%S)"
+    cp "${plist}" "${backup_path}"
+    echo "==> Backup written: ${backup_path}"
+  fi
+
+  mkdir -p "${HOME}/Library/Logs"
+
+  cat > "${plist}" <<PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>sh.ntfy.subscribe</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>${ntfy_bin}</string>
+        <string>subscribe</string>
+        <string>${topic}</string>
+        <string>${notifier}</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>${HOME}/Library/Logs/ntfy-subscribe.log</string>
+    <key>StandardErrorPath</key>
+    <string>${HOME}/Library/Logs/ntfy-subscribe.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
+PLIST_EOF
+  echo "==> Wrote launchd plist: ${plist}"
+
+  # 6. Load via launchctl (bootout-then-bootstrap pattern; kickstart -k).
+  local launchctl_cmd="${NUDGE_LAUNCHCTL_CMD:-launchctl}"
+  local uid
+  uid="$(id -u)"
+  local gui_target="gui/${uid}"
+  "${launchctl_cmd}" bootout  "${gui_target}/sh.ntfy.subscribe" 2>/dev/null || true
+  "${launchctl_cmd}" bootstrap "${gui_target}" "${plist}"        2>/dev/null || true
+  "${launchctl_cmd}" kickstart -k "${gui_target}/sh.ntfy.subscribe" 2>/dev/null || true
+
+  # 7. Permission guidance.
+  local tn_cmd="${NUDGE_TN_CMD:-terminal-notifier}"
+  local open_cmd="${NUDGE_OPEN_CMD:-open}"
+  "${tn_cmd}" -title nudge -message "nudge receiver setup — grant notification permission" >/dev/null 2>&1 || true
+  "${open_cmd}" "x-apple.systempreferences:com.apple.Notifications-Settings.extension" >/dev/null 2>&1 || true
+
+  cat <<PERM_EOF
+==> One-time permission step (System Settings → Notifications):
+    1. Allow 'terminal-notifier' and set its alert style to 'Alerts'.
+    2. Disable Focus / Do Not Disturb if you want notifications during quiet hours.
+    The Notifications pane was opened for you (best-effort).
+PERM_EOF
+
+  # 8. Self-test publish + duplicate-GUI advisory.
+  local publish_cmd="${NUDGE_PUBLISH_CMD:-${ntfy_cmd} publish}"
+  echo "==> Publishing self-test message to topic '${topic}'"
+  # shellcheck disable=SC2086
+  ${publish_cmd} "${topic}" "nudge receiver installed" >/dev/null 2>&1 || true
+  echo "    Check Notification Center for the banner in a few seconds."
+
+  cat <<DUP_EOF
+==> Advisory: if the ntfy GUI/desktop app is running, QUIT it to avoid
+    duplicate notifications. (nudge does NOT auto-quit it.)
+DUP_EOF
+}
+
 # --- Core install (default, conservative) ----------------------------------
 echo "==> Installing nudge to ${INSTALL_DIR}"
 mkdir -p "${INSTALL_DIR}"
 
-# Copy core + all per-tool wrappers + shared lib.
-for src in notify.sh notify-claude.sh notify-codex.sh notify-gemini.sh _nudge_lib.sh; do
+# Copy core + all per-tool wrappers + shared lib + macOS notifier.
+for src in notify.sh notify-claude.sh notify-codex.sh notify-gemini.sh notify-mac.sh _nudge_lib.sh; do
   if [[ -f "${SRC_DIR}/${src}" ]]; then
     cp "${SRC_DIR}/${src}" "${INSTALL_DIR}/${src}"
     chmod +x "${INSTALL_DIR}/${src}"
@@ -401,6 +570,9 @@ fi
 if [[ "${WIRE_GEMINI}" -eq 1 ]]; then
   wire_gemini_settings
 fi
+if [[ "${SETUP_RECEIVER_MACOS}" -eq 1 ]]; then
+  setup_receiver_macos
+fi
 
 cat <<EOF
 
@@ -412,4 +584,6 @@ Next steps:
   4. Wire up each AI tool — either rerun with --wire-claude / --wire-codex /
      --wire-gemini / --wire-all, or merge the matching file in examples/
      into the tool's config manually.
+  5. macOS users: rerun with --setup-receiver-macos to receive notifications
+     natively in Notification Center without the ntfy GUI app.
 EOF
