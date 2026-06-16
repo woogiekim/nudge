@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.nudge/notify.sh 'Gemini CLI' 'Waiting for input or approval' high"
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.nudge/notify.sh 'Gemini CLI' 'Task complete' default"
+          }
+        ]
+      }
+    ]
+  }
+}

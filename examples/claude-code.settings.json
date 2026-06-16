@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.nudge/notify.sh 'Claude Code' 'Response complete' default"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.nudge/notify.sh 'Claude Code' 'Waiting for your input' high"
+          }
+        ]
+      }
+    ]
+  }
+}

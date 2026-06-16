@@ -1,0 +1,13 @@
+# Merge this into ~/.codex/config.toml
+
+# `notify` runs the given command on notification events.
+# Codex appends a JSON payload as the final argument to the command.
+#
+# NOTE (Unverified): the exact JSON schema/fields differ by Codex version.
+# This minimal setup ignores the payload and sends a fixed message. To send
+# event-specific text, wrap notify.sh in a script that parses the JSON (jq).
+notify = ["bash", "-c", "~/.nudge/notify.sh 'Codex CLI' 'Codex needs attention' high"]
+
+[tui]
+# Which events should trigger the notify command above.
+notifications = ["agent-turn-complete", "approval-requested"]
