@@ -25,6 +25,20 @@ mkdir -p "${HOME}/.nudge" 2>/dev/null || true
 printf '%s | prio=%s | %s | %s\n' "$(date '+%F %T')" "${PRIO}" "${TITLE}" "${MSG}" \
   >> "${HOME}/.nudge/ntfy-mac-notify.log" 2>&1
 
+# NTFY_ID dedup guard (PRD §F1–F4). The ntfy server holds a 12h message
+# cache; every subscriber reconnect replays it, so we suppress duplicate
+# banners by id on this Mac. Empty/unset id falls through (F3) so we
+# never silently drop an alert. All I/O tolerates failure to preserve
+# the launchd `exit 0` invariant (F6).
+SEEN="${HOME}/.nudge/seen-ids"
+if [[ -n "${NTFY_ID:-}" ]]; then
+  if grep -Fxq -- "${NTFY_ID}" "${SEEN}" 2>/dev/null; then
+    exit 0
+  fi
+  printf '%s\n' "${NTFY_ID}" >> "${SEEN}" 2>/dev/null || true
+  { tail -n 500 "${SEEN}" > "${SEEN}.tmp" && mv "${SEEN}.tmp" "${SEEN}"; } 2>/dev/null || true
+fi
+
 # Strip double-quotes to keep the strings safe in the osascript fallback.
 TITLE_SAFE="${TITLE//\"/}"
 MSG_SAFE="${MSG//\"/}"
