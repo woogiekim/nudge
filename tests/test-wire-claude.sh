@@ -29,8 +29,11 @@ FIXTURE_DIRS=()
 cleanup() {
   local d
   for d in "${FIXTURE_DIRS[@]:-}"; do
-    [[ -n "${d:-}" && -d "${d}" ]] && rm -rf "${d}"
+    if [[ -n "${d:-}" && -d "${d}" ]]; then
+      rm -rf "${d}"
+    fi
   done
+  return 0
 }
 trap cleanup EXIT
 
