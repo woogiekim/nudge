@@ -124,6 +124,55 @@ affected — their hosts wait for the hook to finish before tearing down.
 session start, so **restart the affected CLI session** after wiring for the
 hooks to load.
 
+## 🍎 macOS headless receiver (opt-in)
+
+On macOS you can opt in to a fully **headless** ntfy receiver that delivers
+each notification natively to Notification Center — without running the ntfy
+GUI / desktop app.
+
+```bash
+# 1. Make sure NTFY_TOPIC is set in ~/.nudge/.env (run `bash install.sh` first
+#    if .env does not yet exist).
+# 2. Provision the receiver:
+bash install.sh --setup-receiver-macos
+```
+
+This flag is **macOS only**; on Linux/Windows it is a clean no-op. It:
+
+- `brew install`s `ntfy` and `terminal-notifier` (idempotent).
+- Copies `notify-mac.sh` into `~/.nudge/` (the per-message notifier).
+- Writes `~/Library/LaunchAgents/sh.ntfy.subscribe.plist`, a launchd agent
+  that runs `ntfy subscribe <NTFY_TOPIC> ~/.nudge/notify-mac.sh` with
+  `RunAtLoad` + `KeepAlive`. An existing plist is preserved as
+  `sh.ntfy.subscribe.plist.bak.YYYYMMDDHHMMSS`.
+- Loads the agent via `launchctl bootout` → `bootstrap` → `kickstart -k`.
+- Publishes a self-test message (`"nudge receiver installed"`) so you can
+  confirm delivery.
+
+### One manual permission step (required by macOS)
+
+macOS does not let installers grant Notification Center permission
+programmatically. After the flag finishes, the installer opens
+**System Settings → Notifications** for you. Do this once:
+
+1. Find **terminal-notifier** in the app list.
+2. Allow notifications and set the alert style to **Alerts**.
+3. Disable **Focus / Do Not Disturb** if you want notifications during
+   quiet hours.
+
+### Duplicate-notifications advisory
+
+If you still have the ntfy **GUI / desktop app** running while the headless
+receiver is also subscribed to the same topic, you will get **two**
+notifications per message. The installer prints this reminder; nudge does
+**not** auto-quit the GUI app — quit it manually if you no longer need it.
+
+### Logs
+
+- Per-message log: `~/.nudge/ntfy-mac-notify.log`
+- launchd stdout / stderr: `~/Library/Logs/ntfy-subscribe.log` and
+  `~/Library/Logs/ntfy-subscribe.err`
+
 ## 🔌 Wiring up each tool
 
 Each tool stores config differently, but all of them ultimately call
@@ -178,4 +227,6 @@ bash tests/test-notify-gemini.sh
 bash tests/test-wire-claude.sh
 bash tests/test-wire-codex.sh
 bash tests/test-wire-gemini.sh
+bash tests/test-setup-receiver-macos.sh
+bash tests/test-notify-mac.sh
 ```
