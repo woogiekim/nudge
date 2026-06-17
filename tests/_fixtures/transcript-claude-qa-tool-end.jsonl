@@ -1,0 +1,4 @@
+{"type":"system","message":"session started"}
+{"type":"user","message":{"content":[{"type":"text","text":"Run the build please"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Sure, kicking off the build now."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_build_1","name":"Bash","input":{"command":"bash build.sh"}}]}}
