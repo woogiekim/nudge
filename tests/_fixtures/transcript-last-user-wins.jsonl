@@ -1,0 +1,8 @@
+{"type":"system","message":"session started"}
+{"type":"ai-title","aiTitle":"Frozen session topic"}
+{"type":"last-prompt","lastPrompt":"Outdated last prompt entry"}
+{"type":"user","message":{"content":"Earliest human turn"}}
+{"type":"assistant","message":{"content":"working"}}
+{"type":"user","message":{"content":[{"type":"text","text":"Current turn — please answer this question"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","content":"shell output that must be ignored"}]}}
+{"type":"assistant","message":{"content":"thinking"}}

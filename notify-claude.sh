@@ -77,19 +77,44 @@ esac
 PROJECT="$(basename "${CWD}" 2>/dev/null || echo '?')"
 BRANCH="$(git_branch_for "${CWD}")"
 
-# Pull question: aiTitle (latest) preferred, else lastPrompt (latest).
+# Pull question with strongest-first priority:
+#   1. LAST transcript record where type=="user" AND content is genuine human
+#      text (string .message.content, OR .message.content[0] of type "text"
+#      with non-empty .text). This avoids tool_result / tool_use / non-user
+#      payloads leaking into the banner body.
+#   2. last-prompt (the entry that updates every turn).
+#   3. ai-title (session-frozen auto-title) — final fallback.
+#   4. empty.
 # Use jq -rs (slurp) so multi-line field values are NOT chopped by tail.
 QUESTION=""
 if [[ "${_JQ_OK}" -eq 1 ]] && [[ -n "${TRANSCRIPT_PATH}" ]] && [[ -f "${TRANSCRIPT_PATH}" ]]; then
-  AITITLE="$(jq -rs '[.[] | select(.type=="ai-title")] | last | .aiTitle // empty' "${TRANSCRIPT_PATH}" 2>/dev/null || true)"
+  USERTXT="$(jq -rs '
+    [ .[]
+      | select(.type=="user")
+      | (.message.content) as $c
+      | if ($c | type) == "string" then $c
+        elif ($c | type) == "array"
+             and ($c | length) > 0
+             and ($c[0].type == "text")
+             and (($c[0].text // "") != "")
+          then $c[0].text
+        else empty end
+    ] | last // empty
+  ' "${TRANSCRIPT_PATH}" 2>/dev/null || true)"
   # Strip a single trailing newline that jq tacks on; do not collapse internal newlines here.
-  AITITLE="${AITITLE%$'\n'}"
-  if [[ -n "${AITITLE}" ]]; then
-    QUESTION="${AITITLE}"
+  USERTXT="${USERTXT%$'\n'}"
+  if [[ -n "${USERTXT}" ]]; then
+    QUESTION="${USERTXT}"
   else
     LASTP="$(jq -rs '[.[] | select(.type=="last-prompt")] | last | .lastPrompt // empty' "${TRANSCRIPT_PATH}" 2>/dev/null || true)"
     LASTP="${LASTP%$'\n'}"
-    [[ -n "${LASTP}" ]] && QUESTION="${LASTP}"
+    if [[ -n "${LASTP}" ]]; then
+      QUESTION="${LASTP}"
+    else
+      AITITLE="$(jq -rs '[.[] | select(.type=="ai-title")] | last | .aiTitle // empty' "${TRANSCRIPT_PATH}" 2>/dev/null || true)"
+      AITITLE="${AITITLE%$'\n'}"
+      [[ -n "${AITITLE}" ]] && QUESTION="${AITITLE}"
+    fi
   fi
 fi
 

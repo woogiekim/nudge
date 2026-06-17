@@ -61,10 +61,14 @@ count_log() {
 }
 
 # ---------------------------------------------------------------------------
-# Scenario 1 — aiTitle present in transcript
+# Scenario 1 — aiTitle AND lastPrompt both present → lastPrompt wins,
+# aiTitle is only a fallback. Body uses the 'Q: ' prefix (no 💬).
+# Spec: prd.md § Feature 2 + Feature 1, acceptance criterion
+#       "Q: Refactor the auth flow to support OAuth", NOT 'Q: OAuth refactor'
+#       and NOT '💬 OAuth refactor'.
 # ---------------------------------------------------------------------------
 scenario_aititle() {
-  echo "[claude:1] aiTitle present → title='Claude Code · <project>', line3=💬 <aiTitle>"
+  echo "[claude:1] aiTitle+lastPrompt both present → line3='Q: <lastPrompt>' (aiTitle loses)"
   SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
 
   local td proj transcript stub_log
@@ -102,18 +106,40 @@ scenario_aititle() {
   fi
   pass "title contains 'Claude Code' and project basename"
 
-  if [[ "${message}" != *"OAuth refactor"* ]]; then
-    fail "message missing aiTitle 'OAuth refactor': ${message}"
+  # Inverted priority: lastPrompt wins over aiTitle.
+  if [[ "${message}" != *"Refactor the auth flow to support OAuth"* ]]; then
+    fail "message missing lastPrompt 'Refactor the auth flow to support OAuth' (priority should prefer lastPrompt over aiTitle): ${message}"
     return
   fi
-  pass "message line 3 contains aiTitle"
+  pass "message line 3 contains lastPrompt (preferred over aiTitle)"
+
+  # Regression: aiTitle must NOT be the body — it is only a fallback.
+  if [[ "${message}" == *"OAuth refactor"* ]]; then
+    fail "message unexpectedly contains aiTitle 'OAuth refactor' — aiTitle must be a final fallback, not preferred: ${message}"
+    return
+  fi
+  pass "message does NOT contain aiTitle (aiTitle is fallback-only)"
+
+  # Shared composer must use 'Q: ' prefix, not 💬.
+  if [[ "${message}" == *"💬"* ]]; then
+    fail "message must not contain the legacy 💬 emoji (composer should emit 'Q: '): ${message}"
+    return
+  fi
+  pass "message does NOT contain the legacy 💬 emoji"
+
+  if [[ "${message}" != *"Q: Refactor the auth flow to support OAuth"* ]]; then
+    fail "message missing 'Q: <lastPrompt>' prefix from shared composer: ${message}"
+    return
+  fi
+  pass "message contains 'Q: <lastPrompt>' (shared composer prefix)"
 }
 
 # ---------------------------------------------------------------------------
-# Scenario 2 — aiTitle absent, fallback to lastPrompt
+# Scenario 2 — aiTitle absent → lastPrompt is used; body uses 'Q: ' prefix.
+# Spec: prd.md § Feature 2 step 2 (lastPrompt fallback) + § Feature 1.
 # ---------------------------------------------------------------------------
 scenario_prompt_fallback() {
-  echo "[claude:2] aiTitle absent → line3=💬 <lastPrompt>"
+  echo "[claude:2] aiTitle absent → line3='Q: <lastPrompt>'"
   SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
 
   local td proj transcript stub_log
@@ -143,6 +169,17 @@ scenario_prompt_fallback() {
     return
   fi
   pass "message contains fallback lastPrompt"
+
+  # Composer must emit 'Q: ' prefix, not 💬.
+  if [[ "${message}" == *"💬"* ]]; then
+    fail "message must not contain the legacy 💬 emoji: ${message}"
+    return
+  fi
+  if [[ "${message}" != *"Q: Fix the broken login page"* ]]; then
+    fail "message missing 'Q: <lastPrompt>' prefix from shared composer: ${message}"
+    return
+  fi
+  pass "message uses 'Q: ' prefix (no 💬)"
 }
 
 # ---------------------------------------------------------------------------
@@ -303,6 +340,87 @@ scenario_multiline() {
 }
 
 # ---------------------------------------------------------------------------
+# Scenario 7 — LAST type=="user" record with genuine text wins over both
+# lastPrompt and aiTitle; a trailing user record whose first content block
+# is a tool_result (not text), and a trailing assistant record, must NOT
+# capture the body.
+# Spec: prd.md § Feature 2 step 1 (LAST type=="user" with genuine human text).
+#
+# Acceptable behavior (per PRD): if backend opts to degrade to the simpler
+# two-tier inversion (lastPrompt → aiTitle → empty) and records that decision
+# in tdd-refactor.md, then 'Outdated last prompt entry' (the lastPrompt)
+# becomes the expected body instead. This scenario asserts the strengthened
+# behavior; the test-coverage matrix documents the acceptable degradation.
+# ---------------------------------------------------------------------------
+scenario_last_user_wins() {
+  echo "[claude:7] LAST type=='user' with genuine text wins over lastPrompt+aiTitle; trailing tool_result/assistant ignored"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj transcript stub_log
+  td="$(make_tmp)"
+  proj="${td}/projLast"
+  mkdir -p "${proj}"
+  transcript="${td}/transcript.jsonl"
+  cp "${FIXTURES}/transcript-last-user-wins.jsonl" "${transcript}"
+  stub_log="${td}/stub.log"
+
+  local stdin_json
+  stdin_json="$(jq -n --arg cwd "${proj}" --arg t "${transcript}" \
+    '{cwd:$cwd, transcript_path:$t, session_id:"s1", hook_event_name:"Stop"}')"
+
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+    bash "${WRAPPER}" <<<"${stdin_json}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]]; then
+    fail "stub was never invoked"
+    return
+  fi
+  local message
+  message="$(read_last_log "${stub_log}" message)"
+
+  # The LAST user record with genuine human text content wins.
+  if [[ "${message}" != *"Current turn — please answer this question"* ]]; then
+    fail "message missing LAST user-text 'Current turn — please answer this question': ${message}"
+    return
+  fi
+  pass "message contains LAST user-record text"
+
+  # The trailing user record whose first content block is type=='tool_result'
+  # must NOT have its embedded shell-output text leak in.
+  if [[ "${message}" == *"shell output that must be ignored"* ]]; then
+    fail "message unexpectedly contains tool_result content — picker must require genuine human text (content[0].type=='text'): ${message}"
+    return
+  fi
+  pass "message does NOT contain trailing tool_result content"
+
+  # An earlier user record must not win over a later one.
+  if [[ "${message}" == *"Earliest human turn"* ]]; then
+    fail "message unexpectedly contains earlier user text 'Earliest human turn' — picker should select the LAST qualifying user record: ${message}"
+    return
+  fi
+  pass "message does NOT contain earlier user-record text"
+
+  # aiTitle is the LOWEST-priority fallback; it must lose to a real user turn.
+  if [[ "${message}" == *"Frozen session topic"* ]]; then
+    fail "message unexpectedly contains aiTitle 'Frozen session topic' — aiTitle must lose to a real user turn: ${message}"
+    return
+  fi
+  pass "message does NOT contain aiTitle"
+
+  # Composer prefix sanity (also locks in the 💬 → Q: change).
+  if [[ "${message}" == *"💬"* ]]; then
+    fail "message must not contain the legacy 💬 emoji: ${message}"
+    return
+  fi
+  if [[ "${message}" != *"Q: Current turn — please answer this question"* ]]; then
+    fail "message missing 'Q: <last-user-text>' prefix from shared composer: ${message}"
+    return
+  fi
+  pass "message uses 'Q: ' prefix with last-user-text"
+}
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 main() {
@@ -323,6 +441,7 @@ main() {
   scenario_notification_event
   scenario_truncation
   scenario_multiline
+  scenario_last_user_wins
 
   echo
   echo "Scenarios run: ${SCENARIOS_RUN}"
