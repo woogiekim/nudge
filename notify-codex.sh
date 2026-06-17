@@ -155,17 +155,23 @@ if [[ -n "${ANSWER}" ]]; then
   ANSWER_TRUNC="$(normalize_answer "${ANSWER}")"
 fi
 
-# Compose ONE combined string "Q: <prompt>  A: <answer>" (two-space inline
-# separator — preserved through to the banner body so receivers can split the
-# two halves reliably). Fallbacks: only prompt → "Q: <prompt>"; only answer →
-# "A: <answer>"; both empty → "" (the 💬 line is omitted).
-QUESTION=""
-if [[ -n "${PROMPT_TRUNC}" ]] && [[ -n "${ANSWER_TRUNC}" ]]; then
-  QUESTION="Q: ${PROMPT_TRUNC}  A: ${ANSWER_TRUNC}"
-elif [[ -n "${PROMPT_TRUNC}" ]]; then
-  QUESTION="Q: ${PROMPT_TRUNC}"
-elif [[ -n "${ANSWER_TRUNC}" ]]; then
-  QUESTION="A: ${ANSWER_TRUNC}"
+# Compose Q-line and A-line separately. PRD § F1 — the body must carry
+# actual LFs between Q and A so notify-mac.sh's 3-segment splitter routes
+# them to subtitle and message respectively. Recommended emoji mapping:
+#   Q line → "💬 ${PROMPT_TRUNC}"
+#   A line → "💡 ${ANSWER_TRUNC}"
+# Fallbacks (preserve existing semantics):
+#   - Both present → emit both lines (joined by LF in the body assembly).
+#   - Only Q present → emit just the Q line.
+#   - Only A present → emit just the A line.
+#   - Both empty → both empty (the 💬/💡 lines are omitted entirely).
+QUESTION_LINE=""
+ANSWER_LINE=""
+if [[ -n "${PROMPT_TRUNC}" ]]; then
+  QUESTION_LINE="💬 ${PROMPT_TRUNC}"
+fi
+if [[ -n "${ANSWER_TRUNC}" ]]; then
+  ANSWER_LINE="💡 ${ANSWER_TRUNC}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -285,18 +291,31 @@ if [[ "${NUDGE_DEBUG:-0}" -eq 1 ]]; then
 fi
 
 # Build the banner directly (bypassing format_and_send's normalize_question
-# step). The Q/A is already codepoint-truncated upstream; calling
-# normalize_question here would collapse the two-space "Q: x  A: y" delimiter
-# and re-apply NUDGE_MAX_Q to the combined string. We replicate the title /
-# branch line / 💬 question construction inline.
+# step). The Q/A is already codepoint-truncated upstream; we assemble the
+# multi-segment LF-delimited body so notify-mac.sh can split it into
+# title/subtitle/message on the receive side.
+#
+# Segment layout (PRD § F1):
+#   - 3 segments (LINE2 + Q + A): "${LINE2}\n💬 ${Q}\n💡 ${A}"
+#   - 2 segments (LINE2 + Q):     "${LINE2}\n💬 ${Q}"
+#   - 2 segments (LINE2 + A):     "${LINE2}\n💡 ${A}"
+#   - 1 segment  (LINE2 only):    "${LINE2}"
+#
+# LINE2 itself never contains an LF, so the LFs the receiver sees are exactly
+# the segment boundaries. The ntfy mobile/web rendering already honors LFs in
+# the body, so this change also yields cleaner multi-line push notifications.
 TITLE="${TOOL_LABEL} · ${PROJECT}"
 LINE2="Response complete"
 if [[ -n "${BRANCH}" ]]; then
   LINE2="${LINE2} · ${BRANCH}"
 fi
 MESSAGE="${LINE2}"
-if [[ -n "${QUESTION}" ]]; then
-  MESSAGE="${LINE2}"$'\n'"💬 ${QUESTION}"
+if [[ -n "${QUESTION_LINE}" ]] && [[ -n "${ANSWER_LINE}" ]]; then
+  MESSAGE="${LINE2}"$'\n'"${QUESTION_LINE}"$'\n'"${ANSWER_LINE}"
+elif [[ -n "${QUESTION_LINE}" ]]; then
+  MESSAGE="${LINE2}"$'\n'"${QUESTION_LINE}"
+elif [[ -n "${ANSWER_LINE}" ]]; then
+  MESSAGE="${LINE2}"$'\n'"${ANSWER_LINE}"
 fi
 
 NOTIFY_CMD="${NUDGE_NOTIFY_CMD:-${HOME}/.nudge/notify.sh}"
