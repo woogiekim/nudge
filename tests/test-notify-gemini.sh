@@ -78,6 +78,18 @@ scenario_afteragent() {
     return
   fi
   pass "message line 3 contains .prompt"
+
+  # Shared composer (in _nudge_lib.sh format_and_send) must emit 'Q: ' prefix,
+  # not the legacy 💬 emoji. Spec: prd.md § Feature 1.
+  if [[ "${message}" == *"💬"* ]]; then
+    fail "message must not contain the legacy 💬 emoji (composer should emit 'Q: '): ${message}"
+    return
+  fi
+  if [[ "${message}" != *"Q: Write a unit test"* ]]; then
+    fail "message missing 'Q: <prompt>' prefix from shared composer: ${message}"
+    return
+  fi
+  pass "message uses 'Q: ' prefix (no 💬)"
 }
 
 # ---------------------------------------------------------------------------
