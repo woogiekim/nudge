@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Spec: prd.md § "Core Features / Must have" — acceptance criteria for
-# install.sh --wire-claude (P1: Claude Code auto hook wiring).
+# install.sh --wire-claude (Stop-only wiring).
 #
-# Four scenarios, derived from the PRD's Gherkin acceptance block:
-#   (a) Merge into absent settings.json
+# Five scenarios, derived from the PRD's Gherkin acceptance block:
+#   (a) Merge into absent settings.json → Stop-only (NOT Notification)
 #   (b) Append preserves a pre-existing non-nudge Stop hook
 #   (c) Idempotent re-run (no duplicate, no new backup)
 #   (d) jq-absent path prints manual snippet and leaves fixture untouched
+#   (e) Pre-existing non-nudge Notification entry is preserved, and the
+#       nudge wrapper is NOT added to .hooks.Notification
 #
 # Test contract:
 # - Each scenario uses a `mktemp -d` fixture HOME so the real
@@ -92,8 +94,13 @@ scenario_a_absent_file() {
     return
   fi
 
-  if ! run_install_wire "${home_dir}" >/dev/null 2>&1; then
-    fail "install.sh --wire-claude exited non-zero"
+  local out
+  set +e
+  out="$(run_install_wire "${home_dir}" 2>&1)"
+  local exit_code=$?
+  set -e
+  if [[ ${exit_code} -ne 0 ]]; then
+    fail "install.sh --wire-claude exited non-zero (exit=${exit_code})"
     return
   fi
 
@@ -134,19 +141,49 @@ scenario_a_absent_file() {
   pass "settings.json does not contain '~' shorthand"
 
   if command -v jq >/dev/null 2>&1; then
-    local stop_cmd notif_cmd
+    local stop_cmd
     stop_cmd="$(jq -r '.hooks.Stop[0].hooks[0].command // ""' "${fixture_file}")"
-    notif_cmd="$(jq -r '.hooks.Notification[0].hooks[0].command // ""' "${fixture_file}")"
     if ! [[ "${stop_cmd}" =~ /\.nudge/notify(-claude)?\.sh ]]; then
       fail ".hooks.Stop[0].hooks[0].command does not reference /.nudge/notify.sh or notify-claude.sh: ${stop_cmd}"
       return
     fi
-    if ! [[ "${notif_cmd}" =~ /\.nudge/notify(-claude)?\.sh ]]; then
-      fail ".hooks.Notification[0].hooks[0].command does not reference /.nudge/notify.sh or notify-claude.sh: ${notif_cmd}"
+    pass ".hooks.Stop references notify(-claude).sh"
+
+    # Stop-only contract: .hooks.Notification is either absent OR contains no
+    # entry whose command matches the nudge wrapper. The dual-hook regression
+    # would put the nudge wrapper under Notification — fail in that case.
+    local notif_nudge_count
+    notif_nudge_count="$(jq -r '
+      [ (.hooks.Notification // [])[]
+        | .hooks[]?
+        | select(.command | test("/\\.nudge/notify(-claude)?\\.sh"))
+      ] | length
+    ' "${fixture_file}")"
+    if [[ "${notif_nudge_count}" -ne 0 ]]; then
+      fail ".hooks.Notification contains ${notif_nudge_count} nudge entry/entries — must be Stop-only"
       return
     fi
-    pass "both .hooks.Stop and .hooks.Notification reference notify.sh"
+    pass ".hooks.Notification does NOT reference the nudge wrapper (Stop-only)"
   fi
+
+  # Echo line must reflect Stop-only contract.
+  if ! grep -F "Stop hook" <<<"${out}" >/dev/null; then
+    fail "from-scratch success echo does not contain 'Stop hook' substring"
+    echo "---- captured output ----" >&2
+    echo "${out}" >&2
+    echo "-------------------------" >&2
+    return
+  fi
+  pass "captured stdout contains 'Stop hook'"
+
+  if grep -F "Notification hooks" <<<"${out}" >/dev/null; then
+    fail "from-scratch success echo still mentions 'Notification hooks' — must be Stop-only"
+    echo "---- captured output ----" >&2
+    echo "${out}" >&2
+    echo "-------------------------" >&2
+    return
+  fi
+  pass "captured stdout does NOT contain 'Notification hooks'"
 }
 
 # ---------------------------------------------------------------------------
@@ -381,6 +418,105 @@ JSON_EOF
 }
 
 # ---------------------------------------------------------------------------
+# Scenario (e) — pre-existing non-nudge Notification entry is preserved AND
+# the nudge wrapper is NOT added to .hooks.Notification (Stop-only contract).
+# ---------------------------------------------------------------------------
+scenario_e_preserves_existing_notification() {
+  echo "[scenario e] preserves a pre-existing non-nudge Notification entry"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "  SKIP: jq not on PATH (this scenario asserts jq-driven Notification preservation)"
+    return
+  fi
+
+  local home_dir
+  home_dir="$(make_fixture_home)"
+  local fixture_file="${home_dir}/.claude/settings.json"
+
+  cat > "${fixture_file}" <<'JSON_EOF'
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/some-user-tool"
+          }
+        ]
+      }
+    ]
+  }
+}
+JSON_EOF
+
+  # Snapshot the pre-existing Notification array byte-for-byte (canonical jq form)
+  # so we can verify it survives unchanged.
+  local pre_notif_json
+  pre_notif_json="$(jq -S '.hooks.Notification' "${fixture_file}")"
+
+  if ! run_install_wire "${home_dir}" >/dev/null 2>&1; then
+    fail "install.sh --wire-claude exited non-zero"
+    return
+  fi
+
+  if [[ ! -f "${fixture_file}" ]]; then
+    fail "fixture file missing after wiring"
+    return
+  fi
+
+  local post_notif_json
+  post_notif_json="$(jq -S '.hooks.Notification' "${fixture_file}")"
+  if [[ "${pre_notif_json}" != "${post_notif_json}" ]]; then
+    fail ".hooks.Notification changed after wiring (Stop-only contract violated)"
+    echo "---- pre ----" >&2
+    echo "${pre_notif_json}" >&2
+    echo "---- post ----" >&2
+    echo "${post_notif_json}" >&2
+    echo "--------------" >&2
+    return
+  fi
+  pass ".hooks.Notification preserved byte-for-byte (user's some-user-tool entry intact)"
+
+  # The user's command must still be findable.
+  if ! grep -F "/usr/local/bin/some-user-tool" "${fixture_file}" >/dev/null 2>&1; then
+    fail "pre-existing /usr/local/bin/some-user-tool entry was lost"
+    return
+  fi
+  pass "pre-existing /usr/local/bin/some-user-tool entry survives"
+
+  # No nudge wrapper should appear under Notification.
+  local notif_nudge_count
+  notif_nudge_count="$(jq -r '
+    [ (.hooks.Notification // [])[]
+      | .hooks[]?
+      | select(.command | test("/\\.nudge/notify(-claude)?\\.sh"))
+    ] | length
+  ' "${fixture_file}")"
+  if [[ "${notif_nudge_count}" -ne 0 ]]; then
+    fail "nudge wrapper was added to .hooks.Notification (${notif_nudge_count} entry/entries) — must be Stop-only"
+    return
+  fi
+  pass "nudge wrapper NOT added to .hooks.Notification"
+
+  # The Stop hook MUST now carry the nudge wrapper.
+  local stop_nudge_count
+  stop_nudge_count="$(jq -r '
+    [ (.hooks.Stop // [])[]
+      | .hooks[]?
+      | select(.command | test("/\\.nudge/notify(-claude)?\\.sh"))
+    ] | length
+  ' "${fixture_file}")"
+  if [[ "${stop_nudge_count}" -lt 1 ]]; then
+    fail ".hooks.Stop is missing the nudge wrapper after wiring"
+    return
+  fi
+  pass ".hooks.Stop carries the nudge wrapper (${stop_nudge_count} entry/entries)"
+}
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 main() {
@@ -393,6 +529,7 @@ main() {
   scenario_b_preserves_existing_stop
   scenario_c_idempotent_rerun
   scenario_d_jq_absent
+  scenario_e_preserves_existing_notification
 
   echo
   echo "Scenarios run: ${SCENARIOS_RUN}"
