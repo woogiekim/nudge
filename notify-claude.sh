@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # nudge — Claude Code context wrapper.
 #
-# Wired into ~/.claude/settings.json hooks (Stop, Notification). Claude Code
-# pipes a JSON object to STDIN with fields cwd, transcript_path, session_id,
-# hook_event_name (Notification also adds message + notification_type).
+# Wired into ~/.claude/settings.json hooks (Stop only). Claude Code pipes a
+# JSON object to STDIN with fields cwd, transcript_path, session_id,
+# hook_event_name. When Stop fires, no additional fields. The code defensively
+# handles Notification events (which add message + notification_type) in case
+# they are wired in the future, but nudge currently wires Stop only.
 #
 # This wrapper extracts project/branch/question and calls the shared notify.sh
 # (or whatever path NUDGE_NOTIFY_CMD points at) with an enriched 3-line message.
