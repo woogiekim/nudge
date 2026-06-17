@@ -157,21 +157,21 @@ fi
 
 # Compose Q-line and A-line separately. PRD § F1 — the body must carry
 # actual LFs between Q and A so notify-mac.sh's 3-segment splitter routes
-# them to subtitle and message respectively. Recommended emoji mapping:
-#   Q line → "💬 ${PROMPT_TRUNC}"
-#   A line → "💡 ${ANSWER_TRUNC}"
+# them to subtitle and message respectively. Recommended label mapping:
+#   Q line → "Q: ${PROMPT_TRUNC}"
+#   A line → "A: ${ANSWER_TRUNC}"
 # Fallbacks (preserve existing semantics):
 #   - Both present → emit both lines (joined by LF in the body assembly).
 #   - Only Q present → emit just the Q line.
 #   - Only A present → emit just the A line.
-#   - Both empty → both empty (the 💬/💡 lines are omitted entirely).
+#   - Both empty → both empty (the Q:/A: lines are omitted entirely).
 QUESTION_LINE=""
 ANSWER_LINE=""
 if [[ -n "${PROMPT_TRUNC}" ]]; then
-  QUESTION_LINE="💬 ${PROMPT_TRUNC}"
+  QUESTION_LINE="Q: ${PROMPT_TRUNC}"
 fi
 if [[ -n "${ANSWER_TRUNC}" ]]; then
-  ANSWER_LINE="💡 ${ANSWER_TRUNC}"
+  ANSWER_LINE="A: ${ANSWER_TRUNC}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -296,9 +296,9 @@ fi
 # title/subtitle/message on the receive side.
 #
 # Segment layout (PRD § F1):
-#   - 3 segments (LINE2 + Q + A): "${LINE2}\n💬 ${Q}\n💡 ${A}"
-#   - 2 segments (LINE2 + Q):     "${LINE2}\n💬 ${Q}"
-#   - 2 segments (LINE2 + A):     "${LINE2}\n💡 ${A}"
+#   - 3 segments (LINE2 + Q + A): "${LINE2}\nQ: ${Q}\nA: ${A}"
+#   - 2 segments (LINE2 + Q):     "${LINE2}\nQ: ${Q}"
+#   - 2 segments (LINE2 + A):     "${LINE2}\nA: ${A}"
 #   - 1 segment  (LINE2 only):    "${LINE2}"
 #
 # LINE2 itself never contains an LF, so the LFs the receiver sees are exactly
