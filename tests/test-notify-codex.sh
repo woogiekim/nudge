@@ -297,21 +297,21 @@ print(json.dumps({
 
 # Extract the Q segment from the captured body. After the F1 LF refactor the
 # body has the shape:
-#     <LINE2>\n💬 <Q>\n💡 <A>            (3-segment)
-#     <LINE2>\n💬 <Q>                    (2-segment, Q-only)
-#     <LINE2>\n💡 <A>                    (2-segment, A-only — Q absent)
+#     <LINE2>\nQ: <Q>\nA: <A>            (3-segment)
+#     <LINE2>\nQ: <Q>                    (2-segment, Q-only)
+#     <LINE2>\nA: <A>                    (2-segment, A-only — Q absent)
 # where "\n" is the 2-char escape the notify stub writes. The Q segment is the
-# substring AFTER "💬 " and BEFORE the next "\n" (or end-of-body).
+# substring AFTER "Q: " and BEFORE the next "\n" (or end-of-body).
 # Returns empty string when there is no Q line.
 extract_q_segment() {
   # $1 = body string (stub-escaped: literal LFs replaced with the 2-char "\n").
   local body="$1"
-  if [[ "${body}" != *'💬 '* ]]; then
+  if [[ "${body}" != *'Q: '* ]]; then
     printf ''
     return 0
   fi
-  # Drop everything up through "💬 ".
-  local after_q="${body#*💬 }"
+  # Drop everything up through "Q: ".
+  local after_q="${body#*Q: }"
   # If a literal "\n" follows, that's the segment terminator; else it's EOL.
   local q_seg
   if [[ "${after_q}" == *'\n'* ]]; then
@@ -322,15 +322,15 @@ extract_q_segment() {
   printf '%s' "${q_seg}"
 }
 
-# Extract the A segment: substring after "💡 " up to the next "\n" or EOL.
+# Extract the A segment: substring after "A: " up to the next "\n" or EOL.
 extract_a_segment() {
   # $1 = body string (stub-escaped).
   local body="$1"
-  if [[ "${body}" != *'💡 '* ]]; then
+  if [[ "${body}" != *'A: '* ]]; then
     printf ''
     return 0
   fi
-  local after_a="${body#*💡 }"
+  local after_a="${body#*A: }"
   local a_seg
   if [[ "${after_a}" == *'\n'* ]]; then
     a_seg="${after_a%%\\n*}"
@@ -1253,21 +1253,21 @@ main() {
 # Q/A separate-line scenarios (prd.md § F1) — Q and A on their own LF-delimited
 # lines, with the historical "Q: ...  A: ..." two-space join removed. The
 # wrapper now composes the body so notify-mac.sh can split:
-#   LINE2 \n 💬 <Q> \n 💡 <A>   (3-segment, both Q+A)
-#   LINE2 \n 💬 <Q>             (2-segment, Q-only)
-#   LINE2 \n 💡 <A>             (2-segment, A-only)
+#   LINE2 \n Q: <Q> \n A: <A>   (3-segment, both Q+A)
+#   LINE2 \n Q: <Q>             (2-segment, Q-only)
+#   LINE2 \n A: <A>             (2-segment, A-only)
 # The stub captures the literal MESSAGE arg; \n is escaped to a 2-char "\n"
 # marker by the stub so the log stays one record per call.
 #
 # Spec: prd.md § F1 — "After the change, the assembly must produce one of:
-#   3 segments (LINE2 + Q + A): \"${LINE2}\"\$'\\n'\"💬 ${Q}\"\$'\\n'\"💡 ${A}\""
+#   3 segments (LINE2 + Q + A): \"${LINE2}\"\$'\\n'\"Q: ${Q}\"\$'\\n'\"A: ${A}\""
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Scenario (l) — full Q+A → body has TWO LFs; second LF immediately followed by "💡 "
+# Scenario (l) — full Q+A → body has TWO LFs; second LF immediately followed by "A: "
 # ---------------------------------------------------------------------------
 scenario_qa_separate_lines_full() {
-  echo "[codex:l] full Q+A → message body has TWO LFs, second LF followed by '💡 '"
+  echo "[codex:l] full Q+A → message body has TWO LFs, second LF followed by 'A: '"
   SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
 
   local td proj stub_log
@@ -1306,13 +1306,13 @@ scenario_qa_separate_lines_full() {
   fi
   pass "(l) body contains exactly 2 LFs"
 
-  # The second LF must be immediately followed by '💡 ' (the A-line prefix).
-  # The body looks like: "<LINE2>\n💬 <Q>\n💡 <A>". Match the second-LF→A pattern.
-  if printf '%s' "${body}" | grep -F -- '\n💡 ' >/dev/null 2>&1 \
-     && printf '%s' "${body}" | grep -F -- '\n💬 ' >/dev/null 2>&1; then
-    pass "(l) second LF is immediately followed by '💡 ' (A-line prefix)"
+  # The second LF must be immediately followed by 'A: ' (the A-line prefix).
+  # The body looks like: "<LINE2>\nQ: <Q>\nA: <A>". Match the second-LF→A pattern.
+  if printf '%s' "${body}" | grep -F -- '\nA: ' >/dev/null 2>&1 \
+     && printf '%s' "${body}" | grep -F -- '\nQ: ' >/dev/null 2>&1; then
+    pass "(l) second LF is immediately followed by 'A: ' (A-line prefix)"
   else
-    fail "(l) LF→💡 or LF→💬 marker missing; body='${body}'"
+    fail "(l) LF→A: or LF→Q: marker missing; body='${body}'"
     return
   fi
 
@@ -1325,25 +1325,25 @@ scenario_qa_separate_lines_full() {
   pass "(l) deprecated two-space 'Q: ...  A: ...' join is gone"
 
   # Sanity: the Q content and A content are still present on their respective lines.
-  if [[ "${body}" != *"💬 ${q}"* ]]; then
-    fail "(l) Q content '💬 ${q}' missing from body"
+  if [[ "${body}" != *"Q: ${q}"* ]]; then
+    fail "(l) Q content 'Q: ${q}' missing from body"
     return
   fi
-  if [[ "${body}" != *"💡 ${a}"* ]]; then
-    fail "(l) A content '💡 ${a}' missing from body"
+  if [[ "${body}" != *"A: ${a}"* ]]; then
+    fail "(l) A content 'A: ${a}' missing from body"
     return
   fi
-  pass "(l) Q line ('💬 …') and A line ('💡 …') both present on separate LF-delimited lines"
+  pass "(l) Q line ('Q: …') and A line ('A: …') both present on separate LF-delimited lines"
 }
 
 # ---------------------------------------------------------------------------
-# Scenario (m) — Q-only fallback → ONE LF; body contains '💬 ' but NOT '💡 '
+# Scenario (m) — Q-only fallback → ONE LF; body contains 'Q: ' but NOT 'A: '
 # ---------------------------------------------------------------------------
 # Spec: prd.md § F1 — "Only Q present → emit just the Q line (no trailing LF)."
-# The resulting MESSAGE is LINE2 \n 💬 <Q>, with exactly ONE LF and no '💡 '
+# The resulting MESSAGE is LINE2 \n Q: <Q>, with exactly ONE LF and no 'A: '
 # segment, and no stray empty A line.
 scenario_qa_q_only_fallback() {
-  echo "[codex:m] Q-only → ONE LF, body contains '💬 ' but NOT '💡 '"
+  echo "[codex:m] Q-only → ONE LF, body contains 'Q: ' but NOT 'A: '"
   SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
 
   local td proj stub_log
@@ -1395,17 +1395,17 @@ print(json.dumps({
   fi
   pass "(m) body contains exactly 1 LF"
 
-  if [[ "${body}" != *"💬 "* ]]; then
-    fail "(m) Q-line prefix '💬 ' missing from body: '${body}'"
+  if [[ "${body}" != *"Q: "* ]]; then
+    fail "(m) Q-line prefix 'Q: ' missing from body: '${body}'"
     return
   fi
-  pass "(m) body contains '💬 ' (Q-line prefix)"
+  pass "(m) body contains 'Q: ' (Q-line prefix)"
 
-  if [[ "${body}" == *"💡"* ]]; then
-    fail "(m) Q-only fallback unexpectedly emitted '💡' (A-line prefix): '${body}'"
+  if [[ "${body}" == *"A: "* ]]; then
+    fail "(m) Q-only fallback unexpectedly emitted 'A: ' (A-line prefix): '${body}'"
     return
   fi
-  pass "(m) body does NOT contain '💡' (no stray A line)"
+  pass "(m) body does NOT contain 'A: ' (no stray A line)"
 
   # And there must be no trailing empty line right at the end (the body's
   # last 2 chars must not be the escaped "\n" marker).
@@ -1418,11 +1418,11 @@ print(json.dumps({
 }
 
 # ---------------------------------------------------------------------------
-# Scenario (n) — A-only fallback → ONE LF; body contains '💡 ' but NOT '💬 '
+# Scenario (n) — A-only fallback → ONE LF; body contains 'A: ' but NOT 'Q: '
 # ---------------------------------------------------------------------------
 # Spec: prd.md § F1 — "Only A present → emit just the A line."
 scenario_qa_a_only_fallback() {
-  echo "[codex:n] A-only → ONE LF, body contains '💡 ' but NOT '💬 '"
+  echo "[codex:n] A-only → ONE LF, body contains 'A: ' but NOT 'Q: '"
   SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
 
   local td proj stub_log
@@ -1473,17 +1473,17 @@ print(json.dumps({
   fi
   pass "(n) body contains exactly 1 LF"
 
-  if [[ "${body}" != *"💡 "* ]]; then
-    fail "(n) A-line prefix '💡 ' missing from body: '${body}'"
+  if [[ "${body}" != *"A: "* ]]; then
+    fail "(n) A-line prefix 'A: ' missing from body: '${body}'"
     return
   fi
-  pass "(n) body contains '💡 ' (A-line prefix)"
+  pass "(n) body contains 'A: ' (A-line prefix)"
 
-  if [[ "${body}" == *"💬"* ]]; then
-    fail "(n) A-only fallback unexpectedly emitted '💬' (Q-line prefix): '${body}'"
+  if [[ "${body}" == *"Q: "* ]]; then
+    fail "(n) A-only fallback unexpectedly emitted 'Q: ' (Q-line prefix): '${body}'"
     return
   fi
-  pass "(n) body does NOT contain '💬' (no stray Q line)"
+  pass "(n) body does NOT contain 'Q: ' (no stray Q line)"
 }
 
 # ---------------------------------------------------------------------------
