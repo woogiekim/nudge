@@ -267,6 +267,106 @@ wire_codex_settings() {
   return 0
 }
 
+# --- Codex hooks.json UserPromptSubmit wiring (fast-turn suppression) ------
+# Mirrors wire_claude_settings: jq-merge, idempotent, timestamped backup,
+# graceful jq-absent degradation. Leaves the config.toml `notify` wiring
+# above intact.
+wire_codex_hooks() {
+  local hooks_file="${NUDGE_CODEX_HOOKS:-${HOME}/.codex/hooks.json}"
+  local hook_path="${HOME}/.nudge/notify-codex-turn-start.sh"
+
+  # Graceful degradation: jq missing → print snippet, exit 0, do not edit.
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "==> jq not found on PATH — skipping Codex hooks.json auto-wiring."
+    echo "    Manual merge required for: ${hooks_file}"
+    echo "    --- begin snippet ---"
+    cat <<MANUAL_EOF
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "matcher": "*", "hooks": [
+          { "type": "command", "command": "${hook_path}" }
+      ] }
+    ]
+  }
+}
+MANUAL_EOF
+    echo "    --- end snippet ---"
+    return 0
+  fi
+
+  # Missing file: create from a minimal jq template.
+  if [[ ! -f "${hooks_file}" ]]; then
+    mkdir -p "$(dirname "${hooks_file}")"
+    local tmp_create
+    tmp_create="$(mktemp "${hooks_file}.tmp.XXXXXX")"
+    jq -n \
+      --arg cmd "${hook_path}" \
+      '{
+        hooks: {
+          UserPromptSubmit: [
+            { matcher: "*", hooks: [ { type: "command", command: $cmd } ] }
+          ]
+        }
+      }' > "${tmp_create}"
+    mv "${tmp_create}" "${hooks_file}"
+    echo "==> Created ${hooks_file} with nudge UserPromptSubmit hook"
+    return 0
+  fi
+
+  # Existing file: validate JSON. Invalid → back up and recreate.
+  if ! jq -e . "${hooks_file}" >/dev/null 2>&1; then
+    local backup_path
+    backup_path="${hooks_file}.bak.$(date +%Y%m%d%H%M%S)"
+    cp "${hooks_file}" "${backup_path}" 2>/dev/null || true
+    echo "==> ${hooks_file} is not valid JSON — backed up to ${backup_path} and recreating."
+    local tmp_recreate
+    tmp_recreate="$(mktemp "${hooks_file}.tmp.XXXXXX")"
+    jq -n \
+      --arg cmd "${hook_path}" \
+      '{
+        hooks: {
+          UserPromptSubmit: [
+            { matcher: "*", hooks: [ { type: "command", command: $cmd } ] }
+          ]
+        }
+      }' > "${tmp_recreate}"
+    mv "${tmp_recreate}" "${hooks_file}"
+    return 0
+  fi
+
+  # Idempotency probe: any UserPromptSubmit hook already targeting
+  # notify-codex-turn-start.sh? Then no-op (do not write, do not back up).
+  local has_hook
+  has_hook="$(jq '[.hooks.UserPromptSubmit[]?.hooks[]?.command // empty] | map(select(test("/notify-codex-turn-start\\.sh"))) | length > 0' "${hooks_file}")"
+
+  if [[ "${has_hook}" == "true" ]]; then
+    echo "==> ${hooks_file} already wired for nudge UserPromptSubmit — no changes made"
+    return 0
+  fi
+
+  # Backup first, then merge.
+  local backup_path
+  backup_path="${hooks_file}.bak.$(date +%Y%m%d%H%M%S)"
+  cp "${hooks_file}" "${backup_path}"
+  echo "==> Backup written: ${backup_path}"
+
+  local tmp_merge
+  tmp_merge="$(mktemp "${hooks_file}.tmp.XXXXXX")"
+
+  jq \
+    --arg cmd "${hook_path}" \
+    '.hooks = ((.hooks // {}) | (
+        .UserPromptSubmit = ((.UserPromptSubmit // []) + [
+          { matcher: "*", hooks: [ { type: "command", command: $cmd } ] }
+        ])
+      ))
+    ' "${hooks_file}" > "${tmp_merge}"
+
+  mv "${tmp_merge}" "${hooks_file}"
+  echo "==> Merged nudge UserPromptSubmit hook into ${hooks_file}"
+}
+
 # --- Gemini CLI hook wiring (P2) -------------------------------------------
 # Same pattern as wire_claude_settings (jq-merge, idempotent, timestamped
 # backup, preserve existing hooks). If ~/.gemini does not exist, skip with
@@ -544,8 +644,9 @@ DUP_EOF
 echo "==> Installing nudge to ${INSTALL_DIR}"
 mkdir -p "${INSTALL_DIR}"
 
-# Copy core + all per-tool wrappers + shared lib + macOS notifier.
-for src in notify.sh notify-claude.sh notify-codex.sh notify-gemini.sh notify-mac.sh _nudge_lib.sh; do
+# Copy core + all per-tool wrappers + shared lib + macOS notifier + Codex
+# UserPromptSubmit hook.
+for src in notify.sh notify-claude.sh notify-codex.sh notify-codex-turn-start.sh notify-gemini.sh notify-mac.sh _nudge_lib.sh; do
   if [[ -f "${SRC_DIR}/${src}" ]]; then
     cp "${SRC_DIR}/${src}" "${INSTALL_DIR}/${src}"
     chmod +x "${INSTALL_DIR}/${src}"
@@ -566,6 +667,7 @@ if [[ "${WIRE_CLAUDE}" -eq 1 ]]; then
 fi
 if [[ "${WIRE_CODEX}" -eq 1 ]]; then
   wire_codex_settings
+  wire_codex_hooks
 fi
 if [[ "${WIRE_GEMINI}" -eq 1 ]]; then
   wire_gemini_settings
