@@ -590,6 +590,285 @@ scenario_skip_bash_input_string() {
   pass "message uses 'Q: ' prefix with prior genuine prompt"
 }
 
+# ===========================================================================
+# Q + A parity scenarios (PRD: Claude Stop-hook banner Q + A parity).
+#
+# These three scenarios pin the new contract added to notify-claude.sh: the
+# composed body delivered to notify.sh must surface BOTH the user prompt
+# (`Q: ...`) AND the trailing assistant answer (`A: ...`) on separate
+# LF-delimited segments — mirroring the Codex path (notify-codex.sh) which
+# already assembles a 3-segment body.
+#
+# Body shape under test (matching notify-codex.sh):
+#   <LINE2>\nQ: <Q>\nA: <A>     (3-segment — Q + A both present)
+#   <LINE2>\nQ: <Q>             (2-segment — A omitted entirely)
+#
+# Each scenario builds a small Claude-shaped JSONL on the fly (or via
+# tests/_fixtures/), points the wrapper at it, and asserts on the body
+# captured by the notify-stub.
+#
+# A-extraction rule under test (per PRD § Core Features):
+#   - Read every record with .type=="assistant".
+#   - Within each record, scan .message.content[] for blocks of .type=="text"
+#     whose .text is non-empty.
+#   - Emit the LAST non-empty .text observed across the whole turn.
+#   - If no non-empty text block exists (e.g. the turn ended in tool_use only),
+#     emit no A line — the body is the 2-segment Q-only shape.
+# ===========================================================================
+
+# Extract the Q segment from a stub-captured body. The stub-captured body uses
+# the 2-char escape sequence "\n" in place of real LFs.
+# Returns the substring after "Q: " and before the next "\n" (or end-of-body).
+extract_q_segment() {
+  local body="$1"
+  if [[ "${body}" != *'Q: '* ]]; then
+    printf ''
+    return 0
+  fi
+  local after_q="${body#*Q: }"
+  local q_seg
+  if [[ "${after_q}" == *'\n'* ]]; then
+    q_seg="${after_q%%\\n*}"
+  else
+    q_seg="${after_q}"
+  fi
+  printf '%s' "${q_seg}"
+}
+
+# Extract the A segment from a stub-captured body. Returns the substring after
+# "A: " and before the next "\n" (or end-of-body). Returns empty string if no
+# "A: " marker exists in the body.
+extract_a_segment() {
+  local body="$1"
+  if [[ "${body}" != *'A: '* ]]; then
+    printf ''
+    return 0
+  fi
+  local after_a="${body#*A: }"
+  local a_seg
+  if [[ "${after_a}" == *'\n'* ]]; then
+    a_seg="${after_a%%\\n*}"
+  else
+    a_seg="${after_a}"
+  fi
+  printf '%s' "${a_seg}"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (a) — Turn ends in an assistant text block
+# ---------------------------------------------------------------------------
+# Spec: prd.md § Scenario A — "Given a Claude transcript JSONL whose last
+#       assistant record has a non-empty text block in .message.content[]
+#       ... Then the composed body sent to notify.sh contains both a 'Q:' line
+#       and an 'A:' line ... And the 'A:' line equals the normalized,
+#       truncated text from that text block."
+scenario_qa_text_end() {
+  echo "[claude:a] turn ends in assistant text block → body has BOTH Q: and A: on separate LF-delimited segments"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj transcript stub_log
+  td="$(make_tmp)"
+  proj="${td}/projQAtext"
+  mkdir -p "${proj}"
+  transcript="${td}/transcript.jsonl"
+  cp "${FIXTURES}/transcript-claude-qa-text-end.jsonl" "${transcript}"
+  stub_log="${td}/stub.log"
+
+  local stdin_json
+  stdin_json="$(jq -n --arg cwd "${proj}" --arg t "${transcript}" \
+    '{cwd:$cwd, transcript_path:$t, session_id:"qa-a", hook_event_name:"Stop"}')"
+
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+    bash "${WRAPPER}" <<<"${stdin_json}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]] || [[ ! -s "${stub_log}" ]]; then
+    fail "(a) stub never called"
+    return
+  fi
+
+  local body
+  body="$(read_last_log "${stub_log}" message)"
+
+  # The body must carry an A line at all (this is the headline regression — the
+  # current notify-claude.sh emits Q only).
+  if [[ "${body}" != *'A: '* ]]; then
+    fail "(a) body missing 'A: ' segment — Claude path is still Q-only: '${body}'"
+    return
+  fi
+  pass "(a) body contains 'A: ' segment (Q + A parity)"
+
+  # Q content must still appear.
+  if [[ "${body}" != *"Q: What is two plus two?"* ]]; then
+    fail "(a) body missing expected Q content 'Q: What is two plus two?': '${body}'"
+    return
+  fi
+  pass "(a) body contains expected Q text"
+
+  # A content must be the assistant's text block content.
+  local a_seg
+  a_seg="$(extract_a_segment "${body}")"
+  if [[ "${a_seg}" != *"Two plus two is four."* ]]; then
+    fail "(a) A segment missing expected answer text 'Two plus two is four.'; a_seg='${a_seg}'; body='${body}'"
+    return
+  fi
+  pass "(a) A segment carries the assistant text-block content"
+
+  # Q and A must live on separate LF-delimited segments (no two-space join).
+  # The notify-stub renders embedded LFs as the 2-char marker "\n". A 3-segment
+  # body (LINE2 + Q + A) therefore contains exactly TWO "\n" markers.
+  local lf_count
+  lf_count=$(printf '%s' "${body}" | awk 'BEGIN{ FS="\\\\n" } { print NF - 1 }')
+  if [[ "${lf_count}" -lt 2 ]]; then
+    fail "(a) expected at least 2 LFs (3-segment LINE2/Q/A body); got ${lf_count}; body='${body}'"
+    return
+  fi
+  pass "(a) body has at least 2 LFs (Q and A on their own LF-delimited segments)"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (b) — Turn ends in a tool_use block (no trailing assistant prose)
+# ---------------------------------------------------------------------------
+# Spec: prd.md § Scenario B — "Given a Claude transcript JSONL whose last
+#       assistant record contains only tool_use blocks ... Then the composed
+#       body sent to notify.sh contains a 'Q:' line And the body contains NO
+#       'A:' line (the A segment is omitted entirely)."
+#
+# Important: the fixture intentionally has an EARLIER assistant text block
+# ("Sure, kicking off the build now.") that the picker MUST NOT pick — because
+# the LAST assistant record carries no text content. The A-extraction rule is
+# "LAST assistant record with a non-empty text block", and the rule must agree
+# with the PRD wording that ties the A line to the trailing-assistant turn.
+#
+# The PRD §Scenario B prose makes the intent explicit ("Turn ends on a tool_use
+# block (no trailing prose) → body contains NO 'A:' line"). The fixture builds
+# this case by placing the tool_use record AFTER the only text block, so the
+# "turn ended in a tool_use" semantics is what the picker must enforce.
+scenario_qa_tool_end() {
+  echo "[claude:b] turn ends in tool_use block → body has Q: but NO A: line"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj transcript stub_log
+  td="$(make_tmp)"
+  proj="${td}/projQAtool"
+  mkdir -p "${proj}"
+  transcript="${td}/transcript.jsonl"
+  cp "${FIXTURES}/transcript-claude-qa-tool-end.jsonl" "${transcript}"
+  stub_log="${td}/stub.log"
+
+  local stdin_json
+  stdin_json="$(jq -n --arg cwd "${proj}" --arg t "${transcript}" \
+    '{cwd:$cwd, transcript_path:$t, session_id:"qa-b", hook_event_name:"Stop"}')"
+
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+    bash "${WRAPPER}" <<<"${stdin_json}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]] || [[ ! -s "${stub_log}" ]]; then
+    fail "(b) stub never called"
+    return
+  fi
+
+  local body
+  body="$(read_last_log "${stub_log}" message)"
+
+  # Q must still be present.
+  if [[ "${body}" != *"Q: Run the build please"* ]]; then
+    fail "(b) body missing expected Q content 'Q: Run the build please': '${body}'"
+    return
+  fi
+  pass "(b) body contains expected Q text"
+
+  # The A: line MUST be omitted entirely. No bare "A:" segment may appear.
+  if [[ "${body}" == *'A: '* ]]; then
+    fail "(b) body unexpectedly contains 'A: ' segment when last assistant record is tool_use only: '${body}'"
+    return
+  fi
+  pass "(b) body does NOT contain 'A: ' segment (A omitted for tool-only turn)"
+
+  # And no stray bare "A:" (even with no trailing space) — empty-A omit policy
+  # must never emit a degenerate "A:" with nothing after.
+  if printf '%s' "${body}" | grep -E '(^|\\n)A:( |$|\\n)' >/dev/null 2>&1; then
+    fail "(b) body has a bare 'A:' segment (empty-A omit policy violated): '${body}'"
+    return
+  fi
+  pass "(b) body has no bare 'A:' segment (empty-A omit policy honored)"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (c) — Multiple assistant text blocks → A equals the LAST non-empty
+# ---------------------------------------------------------------------------
+# Spec: prd.md § Scenario C — "Given a Claude transcript JSONL where several
+#       assistant records carry non-empty text blocks across the same turn
+#       ... Then the 'A:' line equals the LAST non-empty text block in that
+#       turn, not an earlier one."
+#
+# The fixture interleaves three assistant records carrying text (FIRST /
+# MIDDLE / FINAL) with tool_use records, so a naive "last assistant record"
+# selector would pick the trailing tool_use record (which has no text) and a
+# naive "first text" selector would pick the FIRST block. The correct behavior
+# is: the LAST non-empty text content across the turn.
+scenario_qa_multiple_text() {
+  echo "[claude:c] multiple assistant text blocks → A equals the LAST non-empty text block"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj transcript stub_log
+  td="$(make_tmp)"
+  proj="${td}/projQAmulti"
+  mkdir -p "${proj}"
+  transcript="${td}/transcript.jsonl"
+  cp "${FIXTURES}/transcript-claude-qa-multiple-text.jsonl" "${transcript}"
+  stub_log="${td}/stub.log"
+
+  local stdin_json
+  stdin_json="$(jq -n --arg cwd "${proj}" --arg t "${transcript}" \
+    '{cwd:$cwd, transcript_path:$t, session_id:"qa-c", hook_event_name:"Stop"}')"
+
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+    bash "${WRAPPER}" <<<"${stdin_json}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]] || [[ ! -s "${stub_log}" ]]; then
+    fail "(c) stub never called"
+    return
+  fi
+
+  local body
+  body="$(read_last_log "${stub_log}" message)"
+
+  # The A line must exist (parity precondition).
+  if [[ "${body}" != *'A: '* ]]; then
+    fail "(c) body missing 'A: ' segment — Q-only output indicates parity not implemented: '${body}'"
+    return
+  fi
+
+  local a_seg
+  a_seg="$(extract_a_segment "${body}")"
+
+  # MUST contain the FINAL block's text.
+  if [[ "${a_seg}" != *"FINAL assistant text block"* ]]; then
+    fail "(c) A segment missing the LAST non-empty text block 'FINAL assistant text block'; a_seg='${a_seg}'; body='${body}'"
+    return
+  fi
+  pass "(c) A segment carries the LAST non-empty assistant text block"
+
+  # MUST NOT contain the FIRST block's content (regression: a naive selector
+  # that always picks the first text block would surface this).
+  if [[ "${a_seg}" == *"FIRST assistant text block"* ]]; then
+    fail "(c) A segment unexpectedly contains the FIRST text block — selector is picking earliest instead of latest text: '${a_seg}'"
+    return
+  fi
+  pass "(c) A segment does NOT contain the FIRST text block (latest-text rule honored)"
+
+  # MUST NOT contain the MIDDLE block's content (regression: a "second-to-last
+  # record" selector might surface this).
+  if [[ "${a_seg}" == *"MIDDLE assistant text block"* ]]; then
+    fail "(c) A segment unexpectedly contains the MIDDLE text block — selector is not scanning to the last non-empty text: '${a_seg}'"
+    return
+  fi
+  pass "(c) A segment does NOT contain the MIDDLE text block"
+}
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
@@ -615,6 +894,11 @@ main() {
   scenario_skip_skill_expansion
   scenario_skip_command_message_string
   scenario_skip_bash_input_string
+
+  # Q + A parity (PRD: Claude Stop-hook banner Q + A parity)
+  scenario_qa_text_end
+  scenario_qa_tool_end
+  scenario_qa_multiple_text
 
   echo
   echo "Scenarios run: ${SCENARIOS_RUN}"

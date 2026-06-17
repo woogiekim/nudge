@@ -1,0 +1,7 @@
+{"type":"system","message":"session started"}
+{"type":"user","message":{"content":[{"type":"text","text":"Refactor the login module"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"FIRST assistant text block — earliest draft"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_mid","name":"Read","input":{"file_path":"/tmp/x"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"MIDDLE assistant text block — intermediate update"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_last","name":"Edit","input":{"file_path":"/tmp/x"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"FINAL assistant text block — the answer that should surface"}]}}
