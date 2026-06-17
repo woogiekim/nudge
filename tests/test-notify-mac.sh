@@ -460,6 +460,372 @@ scenario_f_rotation_cap() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Scenario (g) — 2-LF body → -title / -subtitle / -message (3-segment route)
+# ---------------------------------------------------------------------------
+# Spec: prd.md § F2 — "If MSG contains TWO OR MORE LFs: split on the FIRST LF
+# into HEAD and REST, then split REST on its FIRST LF into MID and TAIL. Map
+# -subtitle = MID, -message = TAIL. HEAD is DROPPED from the visual banner."
+# The terminal-notifier shim must see args in order: -title <T> -subtitle <MID>
+# -message <TAIL>, with NTFY_TITLE preserved as the title and HEAD nowhere in
+# the arg list.
+scenario_g_two_lf_subtitle_route() {
+  echo "=== Scenario (g): 2-LF body → -title/-subtitle/-message (HEAD dropped) ==="
+  SCENARIOS_RUN=$((SCENARIOS_RUN+1))
+
+  local home_dir
+  home_dir="$(make_fixture_home)"
+  local tn_shim
+  tn_shim="$(make_shim "${home_dir}" "tn" 0)"
+  local osa_shim
+  osa_shim="$(make_shim "${home_dir}" "osa" 0)"
+
+  # 3-segment body: HEAD="Response complete · main", MID="💬 Q?", TAIL="💡 A!"
+  local body
+  body=$'Response complete · main\n💬 Q?\n💡 A!'
+
+  set +e
+  HOME="${home_dir}" \
+    NTFY_TITLE="Codex CLI · workspace" \
+    NTFY_MESSAGE="${body}" \
+    NTFY_PRIORITY="3" \
+    NUDGE_TN_CMD="${tn_shim}" \
+    NUDGE_OSA_CMD="${osa_shim}" \
+    bash "${NOTIFY_MAC}"
+  local rc=$?
+  set -e
+
+  if [[ "${rc}" -ne 0 ]]; then
+    fail "(g) notify-mac.sh exited ${rc}, expected 0"
+  else
+    pass "(g) notify-mac.sh exited 0"
+  fi
+
+  local tn_calls="${home_dir}/_shims/tn.calls"
+  if [[ ! -s "${tn_calls}" ]]; then
+    fail "(g) terminal-notifier shim was NOT invoked"
+    return
+  fi
+
+  # -title arg must carry NTFY_TITLE verbatim.
+  if grep -F -- 'ARG=Codex CLI · workspace' "${tn_calls}" >/dev/null 2>&1; then
+    pass "(g) -title carries 'Codex CLI · workspace'"
+  else
+    fail "(g) -title missing 'Codex CLI · workspace'"
+  fi
+
+  # -subtitle MUST be present and carry MID line (the Q line).
+  if grep -F -- '-subtitle' "${tn_calls}" >/dev/null 2>&1; then
+    pass "(g) -subtitle flag present"
+  else
+    fail "(g) -subtitle flag missing for 3-segment body"
+  fi
+  if grep -F -- 'ARG=💬 Q?' "${tn_calls}" >/dev/null 2>&1; then
+    pass "(g) -subtitle value is the MID/Q line '💬 Q?'"
+  else
+    fail "(g) -subtitle value not the MID/Q line"
+  fi
+
+  # -message MUST carry TAIL (the A line).
+  if grep -F -- 'ARG=💡 A!' "${tn_calls}" >/dev/null 2>&1; then
+    pass "(g) -message value is the TAIL/A line '💡 A!'"
+  else
+    fail "(g) -message value not the TAIL/A line"
+  fi
+
+  # HEAD ("Response complete · main") MUST NOT appear in any tn arg — it is
+  # explicitly dropped from the macOS banner per the PRD trade-off.
+  if grep -F -- 'ARG=Response complete · main' "${tn_calls}" >/dev/null 2>&1; then
+    fail "(g) HEAD 'Response complete · main' leaked into tn args (must be dropped)"
+  else
+    pass "(g) HEAD dropped from tn args (Q+A legibility wins over branch info)"
+  fi
+
+  # Order check: -title, -subtitle, -message must appear in that order.
+  local order
+  order="$(grep -nE '^ARG=(-title|-subtitle|-message)$' "${tn_calls}" | awk -F: '{print $2}' | tr '\n' ',' | sed 's/,$//')"
+  if [[ "${order}" == "ARG=-title,ARG=-subtitle,ARG=-message" ]]; then
+    pass "(g) flag order is -title, -subtitle, -message"
+  else
+    fail "(g) flag order incorrect (got: ${order})"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (h) — 1-LF body → -title / -subtitle / -message (HEAD→subtitle)
+# ---------------------------------------------------------------------------
+# Spec: prd.md § F2 — "If MSG contains exactly ONE LF: split into HEAD (before
+# LF) and TAIL (after LF). Map HEAD → -subtitle, TAIL → -message."
+scenario_h_one_lf_subtitle_route() {
+  echo "=== Scenario (h): 1-LF body → -title/-subtitle/-message (HEAD→subtitle) ==="
+  SCENARIOS_RUN=$((SCENARIOS_RUN+1))
+
+  local home_dir
+  home_dir="$(make_fixture_home)"
+  local tn_shim
+  tn_shim="$(make_shim "${home_dir}" "tn" 0)"
+  local osa_shim
+  osa_shim="$(make_shim "${home_dir}" "osa" 0)"
+
+  # 2-segment body: HEAD="Response complete · main", TAIL="💡 A!" (A-only fallback shape).
+  local body
+  body=$'Response complete · main\n💡 A!'
+
+  set +e
+  HOME="${home_dir}" \
+    NTFY_TITLE="Codex CLI · workspace" \
+    NTFY_MESSAGE="${body}" \
+    NTFY_PRIORITY="3" \
+    NUDGE_TN_CMD="${tn_shim}" \
+    NUDGE_OSA_CMD="${osa_shim}" \
+    bash "${NOTIFY_MAC}"
+  local rc=$?
+  set -e
+
+  if [[ "${rc}" -ne 0 ]]; then
+    fail "(h) notify-mac.sh exited ${rc}, expected 0"
+  else
+    pass "(h) notify-mac.sh exited 0"
+  fi
+
+  local tn_calls="${home_dir}/_shims/tn.calls"
+  if [[ ! -s "${tn_calls}" ]]; then
+    fail "(h) terminal-notifier shim was NOT invoked"
+    return
+  fi
+
+  if grep -F -- '-subtitle' "${tn_calls}" >/dev/null 2>&1; then
+    pass "(h) -subtitle flag present for 1-LF body"
+  else
+    fail "(h) -subtitle flag missing for 1-LF body"
+  fi
+
+  if grep -F -- 'ARG=Response complete · main' "${tn_calls}" >/dev/null 2>&1; then
+    pass "(h) HEAD routed to -subtitle"
+  else
+    fail "(h) HEAD not present as -subtitle arg"
+  fi
+
+  if grep -F -- 'ARG=💡 A!' "${tn_calls}" >/dev/null 2>&1; then
+    pass "(h) TAIL routed to -message"
+  else
+    fail "(h) TAIL not present as -message arg"
+  fi
+
+  # And the LF split must actually have run — that is, the -message arg must
+  # be exactly the TAIL ("💡 A!"), NOT the entire 2-segment body. The shim
+  # writes each arg as its own "ARG=<value>" line, so an arg that itself
+  # contained a literal LF would create a "stray" line in the log that does
+  # NOT start with "ARG=" or "INVOCATION". The presence of such a stray line
+  # is the red signal that the split did not happen.
+  local stray
+  stray=$(grep -cvE '^(ARG=|INVOCATION$)' "${tn_calls}" 2>/dev/null | head -n 1 | tr -d '\n ')
+  stray="${stray:-0}"
+  if [[ "${stray}" -ne 0 ]]; then
+    fail "(h) ${stray} non-ARG line(s) in tn.calls — implies an arg contained a raw LF (split did not run cleanly)"
+    echo "    tn.calls content:" >&2
+    cat "${tn_calls}" >&2
+  else
+    pass "(h) every line in tn.calls is INVOCATION or ARG= (no arg carries a raw LF)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (i) — 0-LF body → -title / -message only (NO -subtitle)
+# ---------------------------------------------------------------------------
+# Spec: prd.md § F2 — "If MSG contains NO LF: behave exactly as today (single
+# -message, single osascript message). DO NOT add a -subtitle flag." This is
+# the bytewise backward-compat guarantee.
+scenario_i_zero_lf_no_subtitle() {
+  echo "=== Scenario (i): 0-LF body → -title/-message only (no -subtitle) ==="
+  SCENARIOS_RUN=$((SCENARIOS_RUN+1))
+
+  local home_dir
+  home_dir="$(make_fixture_home)"
+  local tn_shim
+  tn_shim="$(make_shim "${home_dir}" "tn" 0)"
+  local osa_shim
+  osa_shim="$(make_shim "${home_dir}" "osa" 0)"
+
+  set +e
+  HOME="${home_dir}" \
+    NTFY_TITLE="Plain Title" \
+    NTFY_MESSAGE="single line text" \
+    NTFY_PRIORITY="3" \
+    NUDGE_TN_CMD="${tn_shim}" \
+    NUDGE_OSA_CMD="${osa_shim}" \
+    bash "${NOTIFY_MAC}"
+  local rc=$?
+  set -e
+
+  if [[ "${rc}" -ne 0 ]]; then
+    fail "(i) notify-mac.sh exited ${rc}, expected 0"
+  else
+    pass "(i) notify-mac.sh exited 0"
+  fi
+
+  local tn_calls="${home_dir}/_shims/tn.calls"
+  if [[ ! -s "${tn_calls}" ]]; then
+    fail "(i) terminal-notifier shim was NOT invoked"
+    return
+  fi
+
+  # -subtitle MUST NOT be present for a 0-LF body (bytewise backward compat).
+  if grep -F -- '-subtitle' "${tn_calls}" >/dev/null 2>&1; then
+    fail "(i) -subtitle flag UNEXPECTEDLY present for 0-LF body (breaks backward compat)"
+  else
+    pass "(i) -subtitle flag absent for 0-LF body (backward compat preserved)"
+  fi
+
+  # -title and -message MUST be present with the original values.
+  if grep -F -- 'ARG=Plain Title' "${tn_calls}" >/dev/null 2>&1; then
+    pass "(i) -title carries 'Plain Title'"
+  else
+    fail "(i) -title missing 'Plain Title'"
+  fi
+  if grep -F -- 'ARG=single line text' "${tn_calls}" >/dev/null 2>&1; then
+    pass "(i) -message carries 'single line text' verbatim"
+  else
+    fail "(i) -message does not carry 'single line text' verbatim"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (j) — subtitle containing double-quote → stripped (no AppleScript break)
+# ---------------------------------------------------------------------------
+# Spec: prd.md § F2 — "NEW: SUBTITLE_SAFE=\"${SUBTITLE//\\\"/}\" — identical
+# strip before embedding in the osascript subtitle \"...\" clause and the
+# terminal-notifier -subtitle arg." Force osascript path by making tn fail.
+scenario_j_subtitle_quote_strip() {
+  echo "=== Scenario (j): subtitle with double-quote → stripped (osascript stays valid) ==="
+  SCENARIOS_RUN=$((SCENARIOS_RUN+1))
+
+  local home_dir
+  home_dir="$(make_fixture_home)"
+  local tn_shim
+  tn_shim="$(make_shim "${home_dir}" "tn" 1)"     # nonzero → osascript fallback
+  local osa_shim
+  osa_shim="$(make_shim "${home_dir}" "osa" 0)"
+
+  # 1-LF body where HEAD contains a literal double-quote.
+  local body
+  body=$'Q has "quotes"\n💡 A!'
+
+  set +e
+  HOME="${home_dir}" \
+    NTFY_TITLE="Codex CLI · workspace" \
+    NTFY_MESSAGE="${body}" \
+    NTFY_PRIORITY="3" \
+    NUDGE_TN_CMD="${tn_shim}" \
+    NUDGE_OSA_CMD="${osa_shim}" \
+    bash "${NOTIFY_MAC}"
+  local rc=$?
+  set -e
+
+  if [[ "${rc}" -ne 0 ]]; then
+    fail "(j) notify-mac.sh exited ${rc}, expected 0"
+  else
+    pass "(j) notify-mac.sh exited 0"
+  fi
+
+  local tn_calls="${home_dir}/_shims/tn.calls"
+  local osa_calls="${home_dir}/_shims/osa.calls"
+
+  # On the tn path the -subtitle arg the shim sees must have the `"` stripped.
+  if grep -F -- 'ARG=Q has quotes' "${tn_calls}" >/dev/null 2>&1; then
+    pass "(j) terminal-notifier -subtitle arg has '\"' stripped"
+  else
+    fail "(j) terminal-notifier -subtitle arg did NOT strip '\"' (saw: $(grep -F -- 'Q has' "${tn_calls}" || printf 'none'))"
+  fi
+
+  # The osascript fallback path was forced (tn exit 1). The osascript -e arg
+  # (single combined script string) MUST contain `subtitle "Q has quotes"` —
+  # i.e. with the `"` characters stripped from the subtitle segment.
+  if [[ ! -s "${osa_calls}" ]]; then
+    fail "(j) osascript shim was NOT invoked (tn fail did not trigger fallback)"
+    return
+  fi
+  if grep -F -- 'subtitle "Q has quotes"' "${osa_calls}" >/dev/null 2>&1; then
+    pass "(j) osascript -e command contains: subtitle \"Q has quotes\" (quotes stripped)"
+  else
+    fail "(j) osascript -e command missing the stripped-quote subtitle clause"
+    echo "    osa.calls content:" >&2
+    cat "${osa_calls}" >&2
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (k) — osascript fallback path with 2-LF body → subtitle clause emitted
+# ---------------------------------------------------------------------------
+# Spec: prd.md § F2 — "1-LF or 2-LF case: display notification \"<MSG_SAFE>\"
+# with title \"<TITLE_SAFE>\" subtitle \"<SUBTITLE_SAFE>\"." When the 3-segment
+# body is presented via osascript, the -e arg must contain a `subtitle "..."`
+# clause referencing MID (the Q line), and the message argument of the
+# display-notification call must be TAIL (the A line), NOT the whole body.
+scenario_k_osascript_two_lf_subtitle_clause() {
+  echo "=== Scenario (k): osascript fallback with 2-LF body emits subtitle clause ==="
+  SCENARIOS_RUN=$((SCENARIOS_RUN+1))
+
+  local home_dir
+  home_dir="$(make_fixture_home)"
+  local tn_shim
+  tn_shim="$(make_shim "${home_dir}" "tn" 1)"     # nonzero → fallback
+  local osa_shim
+  osa_shim="$(make_shim "${home_dir}" "osa" 0)"
+
+  local body
+  body=$'Response complete · main\n💬 Q?\n💡 A!'
+
+  set +e
+  HOME="${home_dir}" \
+    NTFY_TITLE="Codex CLI · workspace" \
+    NTFY_MESSAGE="${body}" \
+    NTFY_PRIORITY="3" \
+    NUDGE_TN_CMD="${tn_shim}" \
+    NUDGE_OSA_CMD="${osa_shim}" \
+    bash "${NOTIFY_MAC}"
+  local rc=$?
+  set -e
+
+  if [[ "${rc}" -ne 0 ]]; then
+    fail "(k) notify-mac.sh exited ${rc}, expected 0"
+  else
+    pass "(k) notify-mac.sh exited 0"
+  fi
+
+  local osa_calls="${home_dir}/_shims/osa.calls"
+  if [[ ! -s "${osa_calls}" ]]; then
+    fail "(k) osascript shim was NOT invoked despite tn failure"
+    return
+  fi
+
+  # The -e arg of osascript carries the whole `display notification ...` cmd.
+  # It MUST include `subtitle "💬 Q?"` (the MID line).
+  if grep -F -- 'subtitle "💬 Q?"' "${osa_calls}" >/dev/null 2>&1; then
+    pass "(k) osascript -e includes 'subtitle \"💬 Q?\"' clause"
+  else
+    fail "(k) osascript -e missing 'subtitle \"💬 Q?\"' clause"
+    echo "    osa.calls content:" >&2
+    cat "${osa_calls}" >&2
+  fi
+
+  # The display-notification message argument (the first string in the AppleScript)
+  # must be TAIL (the A line "💡 A!"), NOT the whole body. Match the canonical
+  # AppleScript prefix:  display notification "💡 A!" with title ...
+  if grep -F -- 'display notification "💡 A!" with title' "${osa_calls}" >/dev/null 2>&1; then
+    pass "(k) osascript display-notification message is TAIL (A line)"
+  else
+    fail "(k) osascript message field is not the TAIL/A line"
+  fi
+
+  # HEAD must NOT appear inside the AppleScript command string (it is dropped).
+  if grep -F -- 'Response complete · main' "${osa_calls}" >/dev/null 2>&1; then
+    fail "(k) HEAD 'Response complete · main' leaked into osascript -e arg"
+  else
+    pass "(k) HEAD dropped from osascript -e arg"
+  fi
+}
+
 main() {
   scenario_a_tn_happy_path
   scenario_b_tn_fail_osascript_fallback
@@ -467,6 +833,11 @@ main() {
   scenario_d_ntfy_id_dedup
   scenario_e_empty_id_passthrough
   scenario_f_rotation_cap
+  scenario_g_two_lf_subtitle_route
+  scenario_h_one_lf_subtitle_route
+  scenario_i_zero_lf_no_subtitle
+  scenario_j_subtitle_quote_strip
+  scenario_k_osascript_two_lf_subtitle_clause
 
   echo
   echo "Scenarios run: ${SCENARIOS_RUN}"

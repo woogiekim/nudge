@@ -295,38 +295,49 @@ print(json.dumps({
   fi
 }
 
-# Extract a particular Q-prefix from the body line. The body has the form
-# "...💬 Q: <q-content>  A: <a-content>" (possibly with the ellipsis inside Q
-# or A). This helper returns the substring between "Q: " and the two-space
-# "  A: " delimiter (or end of line when there is no A).
+# Extract the Q segment from the captured body. After the F1 LF refactor the
+# body has the shape:
+#     <LINE2>\n💬 <Q>\n💡 <A>            (3-segment)
+#     <LINE2>\n💬 <Q>                    (2-segment, Q-only)
+#     <LINE2>\n💡 <A>                    (2-segment, A-only — Q absent)
+# where "\n" is the 2-char escape the notify stub writes. The Q segment is the
+# substring AFTER "💬 " and BEFORE the next "\n" (or end-of-body).
+# Returns empty string when there is no Q line.
 extract_q_segment() {
-  # $1 = body string (already de-tab/de-newline escaped, $'\n' is literal \n)
+  # $1 = body string (stub-escaped: literal LFs replaced with the 2-char "\n").
   local body="$1"
-  # Convert the literal \n marker the stub uses back to a newline-free single
-  # string. Then peel "Q: " ... "  A: ".
-  local one="${body//\\n/ }"
-  # Drop everything up through "Q: "
-  local after_q="${one#*Q: }"
-  # If "  A: " exists, drop everything from there onward; else use the rest.
+  if [[ "${body}" != *'💬 '* ]]; then
+    printf ''
+    return 0
+  fi
+  # Drop everything up through "💬 ".
+  local after_q="${body#*💬 }"
+  # If a literal "\n" follows, that's the segment terminator; else it's EOL.
   local q_seg
-  if [[ "${after_q}" == *"  A: "* ]]; then
-    q_seg="${after_q%%  A: *}"
+  if [[ "${after_q}" == *'\n'* ]]; then
+    q_seg="${after_q%%\\n*}"
   else
     q_seg="${after_q}"
   fi
   printf '%s' "${q_seg}"
 }
 
+# Extract the A segment: substring after "💡 " up to the next "\n" or EOL.
 extract_a_segment() {
-  # $1 = body string
+  # $1 = body string (stub-escaped).
   local body="$1"
-  local one="${body//\\n/ }"
-  if [[ "${one}" != *"  A: "* ]]; then
+  if [[ "${body}" != *'💡 '* ]]; then
     printf ''
     return 0
   fi
-  local after_a="${one#*  A: }"
-  printf '%s' "${after_a}"
+  local after_a="${body#*💡 }"
+  local a_seg
+  if [[ "${after_a}" == *'\n'* ]]; then
+    a_seg="${after_a%%\\n*}"
+  else
+    a_seg="${after_a}"
+  fi
+  printf '%s' "${a_seg}"
 }
 
 # ---------------------------------------------------------------------------
@@ -1223,6 +1234,12 @@ main() {
   # install.sh wiring idempotency (F3)
   scenario_install_hooks_idempotent
 
+  # Q/A on separate LF-delimited lines + NTFY_ID dedup invariant (PRD §F1, §F3)
+  scenario_qa_separate_lines_full
+  scenario_qa_q_only_fallback
+  scenario_qa_a_only_fallback
+  scenario_ntfy_id_hash_unchanged_by_lf_refactor
+
   echo
   echo "Scenarios run: ${SCENARIOS_RUN}"
   if [[ ${FAILED} -ne 0 ]]; then
@@ -1230,6 +1247,383 @@ main() {
     exit 1
   fi
   echo "ALL TESTS PASSED"
+}
+
+# ===========================================================================
+# Q/A separate-line scenarios (prd.md § F1) — Q and A on their own LF-delimited
+# lines, with the historical "Q: ...  A: ..." two-space join removed. The
+# wrapper now composes the body so notify-mac.sh can split:
+#   LINE2 \n 💬 <Q> \n 💡 <A>   (3-segment, both Q+A)
+#   LINE2 \n 💬 <Q>             (2-segment, Q-only)
+#   LINE2 \n 💡 <A>             (2-segment, A-only)
+# The stub captures the literal MESSAGE arg; \n is escaped to a 2-char "\n"
+# marker by the stub so the log stays one record per call.
+#
+# Spec: prd.md § F1 — "After the change, the assembly must produce one of:
+#   3 segments (LINE2 + Q + A): \"${LINE2}\"\$'\\n'\"💬 ${Q}\"\$'\\n'\"💡 ${A}\""
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Scenario (l) — full Q+A → body has TWO LFs; second LF immediately followed by "💡 "
+# ---------------------------------------------------------------------------
+scenario_qa_separate_lines_full() {
+  echo "[codex:l] full Q+A → message body has TWO LFs, second LF followed by '💡 '"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj stub_log
+  td="$(make_tmp)"
+  proj="${td}/codexproj_l"
+  mkdir -p "${proj}"
+  stub_log="${td}/stub.log"
+
+  local q="how do I run tests?"
+  local a="bash test.sh"
+  local payload
+  payload="$(make_payload "${proj}" "${q}" "${a}" "turn-l")"
+
+  HOME="${td}" \
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+  NUDGE_MIN_TURN_SEC=0 \
+    bash "${WRAPPER}" "${payload}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]] || [[ ! -s "${stub_log}" ]]; then
+    fail "(l) stub never called"
+    return
+  fi
+
+  local body
+  body="$(read_log_field "${stub_log}" 2)"
+
+  # The stub escapes literal LFs to the 2-char marker "\n". Count occurrences.
+  # The stub escapes literal LFs to the 2-char marker "\n" (backslash + n).
+  # Count occurrences of that 2-char sequence in the captured body field.
+  local lf_count
+  lf_count=$(printf '%s' "${body}" | awk 'BEGIN{ FS="\\\\n" } { print NF - 1 }')
+  if [[ "${lf_count}" -ne 2 ]]; then
+    fail "(l) expected exactly 2 LFs in body for full Q+A; got ${lf_count}; body='${body}'"
+    return
+  fi
+  pass "(l) body contains exactly 2 LFs"
+
+  # The second LF must be immediately followed by '💡 ' (the A-line prefix).
+  # The body looks like: "<LINE2>\n💬 <Q>\n💡 <A>". Match the second-LF→A pattern.
+  if printf '%s' "${body}" | grep -F -- '\n💡 ' >/dev/null 2>&1 \
+     && printf '%s' "${body}" | grep -F -- '\n💬 ' >/dev/null 2>&1; then
+    pass "(l) second LF is immediately followed by '💡 ' (A-line prefix)"
+  else
+    fail "(l) LF→💡 or LF→💬 marker missing; body='${body}'"
+    return
+  fi
+
+  # Two-space join MUST NOT appear anymore (the historical pattern was
+  # "Q: ...  A: ..." — i.e. two consecutive spaces separating Q from A).
+  if [[ "${body}" == *"Q: ${q}  A: ${a}"* ]]; then
+    fail "(l) deprecated 'Q: ...  A: ...' two-space join still present in body: '${body}'"
+    return
+  fi
+  pass "(l) deprecated two-space 'Q: ...  A: ...' join is gone"
+
+  # Sanity: the Q content and A content are still present on their respective lines.
+  if [[ "${body}" != *"💬 ${q}"* ]]; then
+    fail "(l) Q content '💬 ${q}' missing from body"
+    return
+  fi
+  if [[ "${body}" != *"💡 ${a}"* ]]; then
+    fail "(l) A content '💡 ${a}' missing from body"
+    return
+  fi
+  pass "(l) Q line ('💬 …') and A line ('💡 …') both present on separate LF-delimited lines"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (m) — Q-only fallback → ONE LF; body contains '💬 ' but NOT '💡 '
+# ---------------------------------------------------------------------------
+# Spec: prd.md § F1 — "Only Q present → emit just the Q line (no trailing LF)."
+# The resulting MESSAGE is LINE2 \n 💬 <Q>, with exactly ONE LF and no '💡 '
+# segment, and no stray empty A line.
+scenario_qa_q_only_fallback() {
+  echo "[codex:m] Q-only → ONE LF, body contains '💬 ' but NOT '💡 '"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj stub_log
+  td="$(make_tmp)"
+  proj="${td}/codexproj_m"
+  mkdir -p "${proj}"
+  stub_log="${td}/stub.log"
+
+  # Build a payload with Q present but last-assistant-message EMPTY.
+  if ! command -v python3 >/dev/null 2>&1; then
+    fail "(m) python3 required for empty-A payload construction"
+    return
+  fi
+  local payload
+  payload="$(CWD="${proj}" Q="why?" python3 -c '
+import json, os
+print(json.dumps({
+  "type": "agent-turn-complete",
+  "thread-id": "thr-l-m",
+  "turn-id": "turn-m",
+  "cwd": os.environ["CWD"],
+  "client": "codex-cli",
+  "input-messages": [os.environ["Q"]],
+  "last-assistant-message": "",
+}))
+')"
+
+  HOME="${td}" \
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+  NUDGE_MIN_TURN_SEC=0 \
+    bash "${WRAPPER}" "${payload}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]] || [[ ! -s "${stub_log}" ]]; then
+    fail "(m) stub never called"
+    return
+  fi
+
+  local body
+  body="$(read_log_field "${stub_log}" 2)"
+
+  # The stub escapes literal LFs to the 2-char marker "\n" (backslash + n).
+  # Count occurrences of that 2-char sequence in the captured body field.
+  local lf_count
+  lf_count=$(printf '%s' "${body}" | awk 'BEGIN{ FS="\\\\n" } { print NF - 1 }')
+  if [[ "${lf_count}" -ne 1 ]]; then
+    fail "(m) expected exactly 1 LF for Q-only fallback; got ${lf_count}; body='${body}'"
+    return
+  fi
+  pass "(m) body contains exactly 1 LF"
+
+  if [[ "${body}" != *"💬 "* ]]; then
+    fail "(m) Q-line prefix '💬 ' missing from body: '${body}'"
+    return
+  fi
+  pass "(m) body contains '💬 ' (Q-line prefix)"
+
+  if [[ "${body}" == *"💡"* ]]; then
+    fail "(m) Q-only fallback unexpectedly emitted '💡' (A-line prefix): '${body}'"
+    return
+  fi
+  pass "(m) body does NOT contain '💡' (no stray A line)"
+
+  # And there must be no trailing empty line right at the end (the body's
+  # last 2 chars must not be the escaped "\n" marker).
+  local body_tail="${body: -2}"
+  if [[ "${body_tail}" == '\n' ]]; then
+    fail "(m) Q-only body has trailing LF (should not): '${body}'"
+    return
+  fi
+  pass "(m) body has no trailing LF (no empty A line)"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (n) — A-only fallback → ONE LF; body contains '💡 ' but NOT '💬 '
+# ---------------------------------------------------------------------------
+# Spec: prd.md § F1 — "Only A present → emit just the A line."
+scenario_qa_a_only_fallback() {
+  echo "[codex:n] A-only → ONE LF, body contains '💡 ' but NOT '💬 '"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj stub_log
+  td="$(make_tmp)"
+  proj="${td}/codexproj_n"
+  mkdir -p "${proj}"
+  stub_log="${td}/stub.log"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    fail "(n) python3 required for empty-Q payload construction"
+    return
+  fi
+  local payload
+  payload="$(CWD="${proj}" A="all done" python3 -c '
+import json, os
+print(json.dumps({
+  "type": "agent-turn-complete",
+  "thread-id": "thr-n",
+  "turn-id": "turn-n",
+  "cwd": os.environ["CWD"],
+  "client": "codex-cli",
+  "input-messages": [],
+  "last-assistant-message": os.environ["A"],
+}))
+')"
+
+  HOME="${td}" \
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+  NUDGE_MIN_TURN_SEC=0 \
+    bash "${WRAPPER}" "${payload}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]] || [[ ! -s "${stub_log}" ]]; then
+    fail "(n) stub never called"
+    return
+  fi
+
+  local body
+  body="$(read_log_field "${stub_log}" 2)"
+
+  # The stub escapes literal LFs to the 2-char marker "\n" (backslash + n).
+  # Count occurrences of that 2-char sequence in the captured body field.
+  local lf_count
+  lf_count=$(printf '%s' "${body}" | awk 'BEGIN{ FS="\\\\n" } { print NF - 1 }')
+  if [[ "${lf_count}" -ne 1 ]]; then
+    fail "(n) expected exactly 1 LF for A-only fallback; got ${lf_count}; body='${body}'"
+    return
+  fi
+  pass "(n) body contains exactly 1 LF"
+
+  if [[ "${body}" != *"💡 "* ]]; then
+    fail "(n) A-line prefix '💡 ' missing from body: '${body}'"
+    return
+  fi
+  pass "(n) body contains '💡 ' (A-line prefix)"
+
+  if [[ "${body}" == *"💬"* ]]; then
+    fail "(n) A-only fallback unexpectedly emitted '💬' (Q-line prefix): '${body}'"
+    return
+  fi
+  pass "(n) body does NOT contain '💬' (no stray Q line)"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (o) — NTFY_ID hash invariant: unchanged by the LF restructuring
+# ---------------------------------------------------------------------------
+# Spec: prd.md § F1 / F3 / handoff.md — "NTFY_ID dedup hash MUST be unchanged
+# by this refactor. The LF restructuring of NTFY_MESSAGE does NOT leak into
+# the dedup hash input."
+#
+# This test pins the dedup hash against the LF restructuring concretely: the
+# hash must be a stable sha256-shaped digest, computed BEFORE the body
+# assembly. Concretely:
+#
+#   (1) Two calls with IDENTICAL (Q, A, turn-id) MUST produce the same hash.
+#       (Determinism — without this the dedup mechanism cannot suppress
+#       replays at all.)
+#   (2) Two calls with IDENTICAL (Q, A, turn-id) but where one of them feeds
+#       the wrapper a Q that triggers truncation (long-Q vs short-Q with the
+#       same prefix) MUST still produce the same hash. The handoff calls this
+#       the "pre-truncation raw values" rule — the LF/render-side change must
+#       not move the hash to a post-truncation or post-LF-assembly input.
+#   (3) The hash MUST be a 64-char lowercase hex sha256 digest. The PRD
+#       documents the sha256 input format as "qa:<PROMPT_RAW>\\0<ANSWER_RAW>";
+#       this assertion locks in the output shape so a regression to a non-hex,
+#       short, or empty value is caught.
+#   (4) Two calls with DIFFERENT Q (and same turn-id) MUST produce DIFFERENT
+#       hashes. This is the regression guard: if the LF refactor accidentally
+#       breaks the hash input so it stops including Q (e.g. drops Q entirely),
+#       two distinct prompts would collide and dedup would suppress legitimate
+#       follow-up notifications.
+scenario_ntfy_id_hash_unchanged_by_lf_refactor() {
+  echo "[codex:o] NTFY_ID hash invariant — stable across calls, LF refactor does not leak"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj stub_log
+  td="$(make_tmp)"
+  proj="${td}/codexproj_o"
+  mkdir -p "${proj}"
+  stub_log="${td}/stub.log"
+
+  # Call 1 — short Q + A, fixed turn-id.
+  local q1="how do I run tests?"
+  local a1="bash test.sh"
+  local payload1
+  payload1="$(make_payload "${proj}" "${q1}" "${a1}" "turn-o")"
+
+  HOME="${td}" \
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+  NUDGE_MIN_TURN_SEC=0 \
+    bash "${WRAPPER}" "${payload1}" >/dev/null 2>&1 || true
+
+  # Call 2 — IDENTICAL Q + A + turn-id to call 1. Hash must be byte-equal.
+  HOME="${td}" \
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+  NUDGE_MIN_TURN_SEC=0 \
+    bash "${WRAPPER}" "${payload1}" >/dev/null 2>&1 || true
+
+  # Call 3 — SAME turn-id, SAME A, but a LONG Q (forces truncation). The PRD
+  # rule "pre-truncation raw values" means the hash sees the long Q raw, not
+  # the truncated body — and the existing scenario 19 already pins this for
+  # the truncation axis. We replay it here under the new LF assembly to
+  # confirm the LF refactor does not flip the input from raw to LF-rendered.
+  local long_q
+  long_q="$(printf 'h%.0s' $(seq 1 400))"
+  local payload_long
+  payload_long="$(make_payload "${proj}" "${long_q}" "${a1}" "turn-o-long")"
+  HOME="${td}" \
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+  NUDGE_MIN_TURN_SEC=0 \
+    bash "${WRAPPER}" "${payload_long}" >/dev/null 2>&1 || true
+
+  # Call 4 — DIFFERENT Q + A + turn-id. Hash MUST differ from call 1.
+  local q4="totally different prompt"
+  local a4="totally different answer"
+  local payload4
+  payload4="$(make_payload "${proj}" "${q4}" "${a4}" "turn-o-other")"
+  HOME="${td}" \
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+  NUDGE_MIN_TURN_SEC=0 \
+    bash "${WRAPPER}" "${payload4}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]] || [[ ! -s "${stub_log}" ]]; then
+    fail "(o) stub never called"
+    return
+  fi
+
+  local line_count
+  line_count="$(wc -l < "${stub_log}" | tr -d ' ')"
+  if [[ "${line_count}" -ne 4 ]]; then
+    fail "(o) expected 4 stub invocations, got ${line_count}; log:"
+    cat "${stub_log}" >&2
+    return
+  fi
+
+  local id1 id2 id3 id4
+  id1="$(awk -F '\t' 'NR==1{print $4}' "${stub_log}")"
+  id2="$(awk -F '\t' 'NR==2{print $4}' "${stub_log}")"
+  id3="$(awk -F '\t' 'NR==3{print $4}' "${stub_log}")"
+  id4="$(awk -F '\t' 'NR==4{print $4}' "${stub_log}")"
+
+  if [[ -z "${id1}" ]] || [[ -z "${id2}" ]] || [[ -z "${id3}" ]] || [[ -z "${id4}" ]]; then
+    fail "(o) NTFY_ID missing in at least one call (id1='${id1}' id2='${id2}' id3='${id3}' id4='${id4}')"
+    return
+  fi
+
+  # Invariant 1: deterministic for identical input — same payload → same hash.
+  if [[ "${id1}" != "${id2}" ]]; then
+    fail "(o) identical payload produced different NTFY_IDs (non-deterministic hash): id1='${id1}' id2='${id2}'"
+    return
+  fi
+  pass "(o) identical (Q,A,turn-id) → identical NTFY_ID across calls (deterministic)"
+
+  # Invariant 2: shape is a 64-char lowercase hex sha256 digest.
+  if [[ ! "${id1}" =~ ^[0-9a-f]{64}$ ]]; then
+    fail "(o) NTFY_ID is not a 64-char lowercase hex sha256 digest: '${id1}'"
+    return
+  fi
+  pass "(o) NTFY_ID is a 64-char lowercase hex sha256 digest (${id1:0:12}…)"
+
+  # Invariant 3: the LONG-Q variant still produces a sha256-shaped digest
+  # (i.e. the hash path didn't blow up on a 400-char Q that gets truncated
+  # for display). This is the "LF refactor does not leak / hash uses raw
+  # pre-truncation Q" guard, paired with scenario 19.
+  if [[ ! "${id3}" =~ ^[0-9a-f]{64}$ ]]; then
+    fail "(o) NTFY_ID is malformed when Q exceeds truncation cap: '${id3}'"
+    return
+  fi
+  pass "(o) NTFY_ID is well-formed under long-Q truncation path"
+
+  # Invariant 4: different Q+A → different hash (regression guard against
+  # accidentally dropping Q/A from the hash input).
+  if [[ "${id1}" == "${id4}" ]]; then
+    fail "(o) different (Q,A) produced the SAME NTFY_ID — hash dropped Q/A from input"
+    return
+  fi
+  pass "(o) different (Q,A) → different NTFY_ID (Q/A still drive the hash)"
 }
 
 main "$@"
