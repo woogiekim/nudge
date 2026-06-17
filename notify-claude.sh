@@ -30,6 +30,7 @@ if ! declare -f format_and_send >/dev/null 2>&1; then
     [[ -f "${notify}" ]] && bash "${notify}" "${title}" "${3:-Done}" "${6:-default}" 2>/dev/null || true
   }
   normalize_question() { printf '%s' "${1:-}"; }
+  normalize_answer()   { printf '%s' "${1:-}"; }
   git_branch_for() { printf ''; }
 fi
 
@@ -87,6 +88,7 @@ BRANCH="$(git_branch_for "${CWD}")"
 #   4. empty.
 # Use jq -rs (slurp) so multi-line field values are NOT chopped by tail.
 QUESTION=""
+ANSWER=""
 if [[ "${_JQ_OK}" -eq 1 ]] && [[ -n "${TRANSCRIPT_PATH}" ]] && [[ -f "${TRANSCRIPT_PATH}" ]]; then
   USERTXT="$(jq -rs '
     [ .[]
@@ -127,7 +129,87 @@ if [[ "${_JQ_OK}" -eq 1 ]] && [[ -n "${TRANSCRIPT_PATH}" ]] && [[ -f "${TRANSCRI
       [[ -n "${AITITLE}" ]] && QUESTION="${AITITLE}"
     fi
   fi
+
+  # Extract the assistant answer (A) from the transcript JSONL.
+  # Selector: examine the LAST `.type=="assistant"` record (slurped over the
+  # whole transcript). Within that record's `.message.content[]` array, emit
+  # the LAST non-empty `text` block. If the last assistant record carries no
+  # text block (e.g. it is tool_use-only), emit empty — caller omits the A
+  # line entirely (mirrors notify-codex.sh's empty-A omit policy).
+  #
+  # Rationale: a Claude turn often contains multiple assistant records
+  # (thinking / tool_use / text). A naive "last assistant record" pick is
+  # frequently a tool_use record with no text. The picker must agree with the
+  # PRD's "turn ends in tool_use → omit A" semantics, so it inspects the LAST
+  # assistant record specifically rather than scanning across the whole turn.
+  ANSWER="$(jq -rs '
+    [ .[] | select(.type=="assistant") ] | last as $rec
+    | if $rec == null then empty
+      else
+        [ ($rec.message.content // [])[]
+          | select(.type=="text")
+          | (.text // "")
+          | select(. != "")
+        ] | last // empty
+      end
+  ' "${TRANSCRIPT_PATH}" 2>/dev/null || true)"
+  # Strip a single trailing newline that jq tacks on.
+  ANSWER="${ANSWER%$'\n'}"
 fi
 
-format_and_send "${TOOL_LABEL}" "${PROJECT}" "${EVENT_TEXT}" "${BRANCH}" "${QUESTION}" "${PRIORITY}"
+# Trim the assistant answer to its first line BEFORE codepoint truncation
+# (multi-line answers must not survive into the banner). Mirrors
+# notify-codex.sh:142-144.
+if [[ -n "${ANSWER}" ]]; then
+  ANSWER="${ANSWER%%$'\n'*}"
+fi
+
+# Apply codepoint-safe normalization/truncation. normalize_question collapses
+# control chars and truncates to NUDGE_MAX_Q; normalize_answer does the same
+# for NUDGE_MAX_A. Both bypass launchd's C locale by forcing UTF-8.
+QUESTION_TRUNC=""
+ANSWER_TRUNC=""
+if [[ -n "${QUESTION}" ]]; then
+  QUESTION_TRUNC="$(normalize_question "${QUESTION}")"
+fi
+if [[ -n "${ANSWER}" ]]; then
+  ANSWER_TRUNC="$(normalize_answer "${ANSWER}")"
+fi
+
+# Build labeled Q and A lines (only when content is present).
+QUESTION_LINE=""
+ANSWER_LINE=""
+if [[ -n "${QUESTION_TRUNC}" ]]; then
+  QUESTION_LINE="Q: ${QUESTION_TRUNC}"
+fi
+if [[ -n "${ANSWER_TRUNC}" ]]; then
+  ANSWER_LINE="A: ${ANSWER_TRUNC}"
+fi
+
+# Compose the 3-segment LF-delimited body (mirrors notify-codex.sh:307-319).
+# Segment layout:
+#   - 3 segments (LINE2 + Q + A): "${LINE2}\nQ: ${Q}\nA: ${A}"
+#   - 2 segments (LINE2 + Q):     "${LINE2}\nQ: ${Q}"
+#   - 2 segments (LINE2 + A):     "${LINE2}\nA: ${A}"  (Q absent)
+#   - 1 segment  (LINE2 only):    "${LINE2}"
+# Empty-A policy: when ANSWER_LINE is empty, the A segment is omitted entirely
+# (no bare "A:" ever appears).
+TITLE="${TOOL_LABEL} · ${PROJECT}"
+LINE2="${EVENT_TEXT}"
+if [[ -n "${BRANCH}" ]]; then
+  LINE2="${EVENT_TEXT} · ${BRANCH}"
+fi
+MESSAGE="${LINE2}"
+if [[ -n "${QUESTION_LINE}" ]] && [[ -n "${ANSWER_LINE}" ]]; then
+  MESSAGE="${LINE2}"$'\n'"${QUESTION_LINE}"$'\n'"${ANSWER_LINE}"
+elif [[ -n "${QUESTION_LINE}" ]]; then
+  MESSAGE="${LINE2}"$'\n'"${QUESTION_LINE}"
+elif [[ -n "${ANSWER_LINE}" ]]; then
+  MESSAGE="${LINE2}"$'\n'"${ANSWER_LINE}"
+fi
+
+NOTIFY_CMD="${NUDGE_NOTIFY_CMD:-${HOME}/.nudge/notify.sh}"
+if [[ -x "${NOTIFY_CMD}" ]] || [[ -f "${NOTIFY_CMD}" ]]; then
+  bash "${NOTIFY_CMD}" "${TITLE}" "${MESSAGE}" "${PRIORITY}" 2>/dev/null || true
+fi
 exit 0
