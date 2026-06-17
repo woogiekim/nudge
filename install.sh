@@ -594,14 +594,65 @@ setup_receiver_macos() {
 PLIST_EOF
   echo "==> Wrote launchd plist: ${plist}"
 
-  # 6. Load via launchctl (bootout-then-bootstrap pattern; kickstart -k).
+  # 6. Load via launchctl: bootout, settle-wait, then bounded bootstrap retry.
+  #    Async-teardown race: launchctl bootout returns before the service is
+  #    fully unloaded, so a follow-up bootstrap can race and fail with
+  #    "Bootstrap failed: 5: Input/output error" or "service already
+  #    bootstrapped". Poll print(1) until the service is gone (bounded),
+  #    then retry bootstrap (bounded), then emit a non-fatal WARN if the
+  #    final state is still not-loaded. RunAtLoad=true on a fresh bootstrap
+  #    runs the service, so the old `kickstart -k` is intentionally dropped.
   local launchctl_cmd="${NUDGE_LAUNCHCTL_CMD:-launchctl}"
   local uid
   uid="$(id -u)"
   local gui_target="gui/${uid}"
-  "${launchctl_cmd}" bootout  "${gui_target}/sh.ntfy.subscribe" 2>/dev/null || true
-  "${launchctl_cmd}" bootstrap "${gui_target}" "${plist}"        2>/dev/null || true
-  "${launchctl_cmd}" kickstart -k "${gui_target}/sh.ntfy.subscribe" 2>/dev/null || true
+  local svc="${gui_target}/sh.ntfy.subscribe"
+
+  # F1. bootout + bounded settle-wait. Capture rc explicitly under
+  #     set -euo pipefail by using the if/else form. rc=3 (No such
+  #     process — nothing was loaded) is treated as already-settled.
+  local bootout_rc
+  if "${launchctl_cmd}" bootout "${svc}"; then
+    bootout_rc=0
+  else
+    bootout_rc=$?
+  fi
+
+  if [[ "${bootout_rc}" -ne 3 ]]; then
+    local settle_i=0
+    while [[ "${settle_i}" -lt 10 ]]; do
+      if ! "${launchctl_cmd}" print "${svc}" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.5
+      settle_i=$((settle_i + 1))
+    done
+  fi
+
+  # F2. Bounded bootstrap retry (up to 5 attempts).
+  local bootstrap_attempt=0
+  local bootstrap_ok=0
+  while [[ "${bootstrap_attempt}" -lt 5 ]]; do
+    bootstrap_attempt=$((bootstrap_attempt + 1))
+    if "${launchctl_cmd}" bootstrap "${gui_target}" "${plist}"; then
+      bootstrap_ok=1
+      break
+    fi
+    sleep 0.5
+  done
+
+  # Final is-loaded probe — authoritative final state.
+  local final_loaded=0
+  if "${launchctl_cmd}" print "${svc}" >/dev/null 2>&1; then
+    final_loaded=1
+  fi
+
+  # F3. Non-fatal WARN when bootstrap never succeeded AND service is not
+  #     loaded. The script continues to self-test publish / permission
+  #     guidance / duplicate-GUI advisory and exits 0.
+  if [[ "${bootstrap_ok}" -eq 0 && "${final_loaded}" -eq 0 ]]; then
+    >&2 echo "==> WARN: launchd bootstrap of sh.ntfy.subscribe failed after ${bootstrap_attempt} attempts; run 'launchctl bootstrap gui/${uid} ${plist}' manually"
+  fi
 
   # 7. Permission guidance.
   local tn_cmd="${NUDGE_TN_CMD:-terminal-notifier}"
