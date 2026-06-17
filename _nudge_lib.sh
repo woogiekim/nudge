@@ -164,7 +164,7 @@ git_branch_for() {
 # Builds:
 #   TITLE = "{tool} · {project}"  (ntfy's `Tags: robot` adds the 🤖 icon)
 #   MESSAGE line2 = "{event}" or "{event} · {branch}"
-#   MESSAGE line3 = "💬 {question}"   (omitted if question empty)
+#   MESSAGE line3 = "Q: {question}"   (omitted if question empty)
 # Then calls notify.sh "{TITLE}" "{MESSAGE}" "{priority}".
 #
 # Always returns 0 (fail-soft).
@@ -191,7 +191,7 @@ format_and_send() {
     local q
     q="$(normalize_question "${question_raw}")"
     if [[ -n "${q}" ]]; then
-      message="${line2}"$'\n'"💬 ${q}"
+      message="${line2}"$'\n'"Q: ${q}"
     fi
   fi
 
