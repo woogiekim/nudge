@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # TDD tests for notify-codex.sh — Codex CLI's `notify` program receives the
 # JSON payload as ARGV[1] (not stdin). Gate on type=="agent-turn-complete";
-# extract project from .cwd (fallback $PWD); question from .input-messages[0].
+# extract project from .cwd (fallback $PWD); the per-turn message must surface
+# the CURRENT-turn prompt (.input-messages[-1]) AND the assistant answer
+# (.last-assistant-message). The FIRST input-messages element is the original
+# session-opening prompt and must NOT appear in later-turn notifications.
 
 set -uo pipefail
 
@@ -45,10 +48,18 @@ read_last_log() {
 }
 
 # ---------------------------------------------------------------------------
-# Scenario 1 — agent-turn-complete with cwd & input-messages
+# Scenario 1 — agent-turn-complete with cwd, current-turn prompt, and answer
 # ---------------------------------------------------------------------------
+# The notification message body must contain:
+#   - the LAST input-messages element ("Now add a regression test") — the
+#     current-turn prompt
+#   - the last-assistant-message text ("Done — pushed a fix.") — the just-
+#     produced answer
+# It must NOT contain the FIRST input-messages element
+# ("Fix the login bug in auth.py") — that is the original session-opening
+# prompt, not the current turn.
 scenario_agent_turn_complete() {
-  echo "[codex:1] agent-turn-complete → title with project, message with prompt"
+  echo "[codex:1] agent-turn-complete → title with project, message with current-turn prompt + answer"
   SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
 
   local td proj stub_log
@@ -79,11 +90,23 @@ scenario_agent_turn_complete() {
   fi
   pass "title contains 'Codex CLI' and project basename"
 
-  if [[ "${message}" != *"Fix the login bug"* ]]; then
-    fail "message missing input-messages[0]: ${message}"
+  if [[ "${message}" != *"Now add a regression test"* ]]; then
+    fail "message missing current-turn prompt (input-messages[-1]): ${message}"
     return
   fi
-  pass "message line 3 contains input-messages[0]"
+  pass "message contains current-turn prompt (input-messages[-1])"
+
+  if [[ "${message}" != *"Done — pushed a fix"* ]]; then
+    fail "message missing assistant answer (last-assistant-message): ${message}"
+    return
+  fi
+  pass "message contains assistant answer (last-assistant-message)"
+
+  if [[ "${message}" == *"Fix the login bug in auth.py"* ]]; then
+    fail "message must NOT contain input-messages[0] when later turns exist: ${message}"
+    return
+  fi
+  pass "message does NOT contain input-messages[0]"
 }
 
 # ---------------------------------------------------------------------------
@@ -184,6 +207,44 @@ scenario_no_argv() {
 }
 
 # ---------------------------------------------------------------------------
+# Scenario 5 — regression guard: first input-message must NOT appear when
+# later turns exist. This is the [0]-vs-[-1] bug pin: the wrapper used to
+# read input-messages[0], which surfaced the session-opening prompt forever.
+# Uses the same expanded complete fixture (input-messages has 3 elements,
+# last differs from first).
+# ---------------------------------------------------------------------------
+scenario_first_message_not_shown() {
+  echo "[codex:5] later-turn payload → first input-message must NOT appear in body"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj stub_log
+  td="$(make_tmp)"
+  proj="${td}/codexproj5"
+  mkdir -p "${proj}"
+  stub_log="${td}/stub.log"
+
+  local payload
+  payload="$(sed "s|__CWD_PLACEHOLDER__|${proj}|" "${FIXTURES}/codex-payload-complete.json")"
+
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+    bash "${WRAPPER}" "${payload}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]]; then
+    fail "stub never called"
+    return
+  fi
+  local message
+  message="$(read_last_log "${stub_log}" message)"
+
+  if [[ "${message}" == *"Fix the login bug in auth.py"* ]]; then
+    fail "regression: first input-message leaked into body — wrapper still reading [0] not [-1]: ${message}"
+    return
+  fi
+  pass "first input-message ('Fix the login bug in auth.py') is NOT in body"
+}
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 main() {
@@ -201,6 +262,7 @@ main() {
   scenario_other_event_silent
   scenario_cwd_fallback
   scenario_no_argv
+  scenario_first_message_not_shown
 
   echo
   echo "Scenarios run: ${SCENARIOS_RUN}"
