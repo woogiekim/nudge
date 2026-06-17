@@ -91,8 +91,19 @@ if [[ "${_JQ_OK}" -eq 1 ]] && [[ -n "${TRANSCRIPT_PATH}" ]] && [[ -f "${TRANSCRI
   USERTXT="$(jq -rs '
     [ .[]
       | select(.type=="user")
+      | select((.isMeta // false) != true)
+      | select(.toolUseResult == null)
       | (.message.content) as $c
-      | if ($c | type) == "string" then $c
+      | if ($c | type) == "string" then
+          (if ($c | startswith("<command-message>"))
+             or ($c | startswith("<command-name>"))
+             or ($c | startswith("<command-args>"))
+             or ($c | startswith("<local-command-stdout>"))
+             or ($c | startswith("<local-command-caveat>"))
+             or ($c | startswith("<bash-input>"))
+             or ($c | startswith("<bash-stdout>"))
+             or ($c | startswith("<bash-stderr>"))
+           then empty else $c end)
         elif ($c | type) == "array"
              and ($c | length) > 0
              and ($c[0].type == "text")

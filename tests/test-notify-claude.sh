@@ -421,6 +421,176 @@ scenario_last_user_wins() {
 }
 
 # ---------------------------------------------------------------------------
+# Scenario 8 — isMeta:true skill expansion + tool_result user records are
+# SKIPPED; the genuine prior human prompt wins.
+# Spec: prd.md § Feature 1 (filter isMeta + toolUseResult) and Feature 5
+#       (regression fixture transcript-skill-expansion.jsonl).
+# ---------------------------------------------------------------------------
+scenario_skip_skill_expansion() {
+  echo "[claude:8] isMeta + tool_result user records skipped → prior genuine prompt wins"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj transcript stub_log
+  td="$(make_tmp)"
+  proj="${td}/projSkill"
+  mkdir -p "${proj}"
+  transcript="${td}/transcript.jsonl"
+  cp "${FIXTURES}/transcript-skill-expansion.jsonl" "${transcript}"
+  stub_log="${td}/stub.log"
+
+  local stdin_json
+  stdin_json="$(jq -n --arg cwd "${proj}" --arg t "${transcript}" \
+    '{cwd:$cwd, transcript_path:$t, session_id:"s1", hook_event_name:"Stop"}')"
+
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+    bash "${WRAPPER}" <<<"${stdin_json}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]]; then
+    fail "stub was never invoked"
+    return
+  fi
+  local message
+  message="$(read_last_log "${stub_log}" message)"
+
+  # The genuine prior human prompt must be the body.
+  if [[ "${message}" != *"Please summarize the order flow"* ]]; then
+    fail "message missing genuine human prompt 'Please summarize the order flow': ${message}"
+    return
+  fi
+  pass "message contains genuine human prompt"
+
+  # isMeta:true skill-expansion body MUST NOT leak in.
+  if [[ "${message}" == *"# crew:run"* ]]; then
+    fail "message unexpectedly contains skill-expansion body '# crew:run' (isMeta:true must be filtered): ${message}"
+    return
+  fi
+  pass "message does NOT contain '# crew:run' skill body"
+
+  # tool_result user record body MUST NOT leak in.
+  if [[ "${message}" == *"Launching skill"* ]]; then
+    fail "message unexpectedly contains tool_result body 'Launching skill' (toolUseResult must be filtered): ${message}"
+    return
+  fi
+  pass "message does NOT contain 'Launching skill' tool_result body"
+
+  # Composer prefix sanity.
+  if [[ "${message}" != *"Q: Please summarize the order flow"* ]]; then
+    fail "message missing 'Q: <genuine-prompt>' prefix: ${message}"
+    return
+  fi
+  pass "message uses 'Q: ' prefix with genuine prompt"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 9 — string content starting with '<command-message>' is treated as
+# an injected sentinel, not a human prompt; prior genuine prompt wins.
+# Spec: prd.md § Feature 2 (8-prefix sentinel list, '<command-message>' case).
+# ---------------------------------------------------------------------------
+scenario_skip_command_message_string() {
+  echo "[claude:9] last user record is '<command-message>...' string → prior genuine prompt wins"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj transcript stub_log
+  td="$(make_tmp)"
+  proj="${td}/projCmdMsg"
+  mkdir -p "${proj}"
+  transcript="${td}/transcript.jsonl"
+  cp "${FIXTURES}/transcript-with-command-message.jsonl" "${transcript}"
+  stub_log="${td}/stub.log"
+
+  local stdin_json
+  stdin_json="$(jq -n --arg cwd "${proj}" --arg t "${transcript}" \
+    '{cwd:$cwd, transcript_path:$t, session_id:"s1", hook_event_name:"Stop"}')"
+
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+    bash "${WRAPPER}" <<<"${stdin_json}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]]; then
+    fail "stub was never invoked"
+    return
+  fi
+  local message
+  message="$(read_last_log "${stub_log}" message)"
+
+  if [[ "${message}" != *"Please summarize the order flow"* ]]; then
+    fail "message missing genuine prior prompt 'Please summarize the order flow': ${message}"
+    return
+  fi
+  pass "message contains prior genuine human prompt"
+
+  if [[ "${message}" == *"<command-message>"* ]]; then
+    fail "message unexpectedly contains '<command-message>' sentinel body (must be filtered): ${message}"
+    return
+  fi
+  pass "message does NOT contain '<command-message>' sentinel body"
+
+  if [[ "${message}" != *"Q: Please summarize the order flow"* ]]; then
+    fail "message missing 'Q: <genuine-prompt>' prefix: ${message}"
+    return
+  fi
+  pass "message uses 'Q: ' prefix with prior genuine prompt"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 10 — string content starting with '<bash-input>' is treated as an
+# injected sentinel, not a human prompt; prior genuine prompt wins.
+# Spec: prd.md § Feature 2 (8-prefix sentinel list, '<bash-input>' case).
+# ---------------------------------------------------------------------------
+scenario_skip_bash_input_string() {
+  echo "[claude:10] last user record is '<bash-input>...' string → prior genuine prompt wins"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj transcript stub_log
+  td="$(make_tmp)"
+  proj="${td}/projBashIn"
+  mkdir -p "${proj}"
+  transcript="${td}/transcript.jsonl"
+  cp "${FIXTURES}/transcript-with-bash-input.jsonl" "${transcript}"
+  stub_log="${td}/stub.log"
+
+  local stdin_json
+  stdin_json="$(jq -n --arg cwd "${proj}" --arg t "${transcript}" \
+    '{cwd:$cwd, transcript_path:$t, session_id:"s1", hook_event_name:"Stop"}')"
+
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+    bash "${WRAPPER}" <<<"${stdin_json}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]]; then
+    fail "stub was never invoked"
+    return
+  fi
+  local message
+  message="$(read_last_log "${stub_log}" message)"
+
+  if [[ "${message}" != *"Please summarize the order flow"* ]]; then
+    fail "message missing genuine prior prompt 'Please summarize the order flow': ${message}"
+    return
+  fi
+  pass "message contains prior genuine human prompt"
+
+  if [[ "${message}" == *"<bash-input>"* ]]; then
+    fail "message unexpectedly contains '<bash-input>' sentinel body (must be filtered): ${message}"
+    return
+  fi
+  pass "message does NOT contain '<bash-input>' sentinel body"
+
+  if [[ "${message}" == *"echo hi"* ]]; then
+    fail "message unexpectedly contains bash-input payload 'echo hi' (must be filtered): ${message}"
+    return
+  fi
+  pass "message does NOT contain bash-input payload"
+
+  if [[ "${message}" != *"Q: Please summarize the order flow"* ]]; then
+    fail "message missing 'Q: <genuine-prompt>' prefix: ${message}"
+    return
+  fi
+  pass "message uses 'Q: ' prefix with prior genuine prompt"
+}
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 main() {
@@ -442,6 +612,9 @@ main() {
   scenario_truncation
   scenario_multiline
   scenario_last_user_wins
+  scenario_skip_skill_expansion
+  scenario_skip_command_message_string
+  scenario_skip_bash_input_string
 
   echo
   echo "Scenarios run: ${SCENARIOS_RUN}"
