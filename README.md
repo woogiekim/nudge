@@ -18,7 +18,7 @@ parses the tool's hook payload (project dir, git branch, latest user prompt
 or AI title) and then hands a context-rich title + message to `notify.sh`.
 
 ```
-Claude Code (Stop / Notification hook) ─→ notify-claude.sh ┐
+Claude Code (Stop hook) ─→ notify-claude.sh ┐
 Codex CLI   (notify program, JSON argv) ─→ notify-codex.sh ├─→ notify.sh ─→ ntfy.sh/<topic> ─→ phone / desktop
 Gemini CLI  (AfterAgent / Notification) ─→ notify-gemini.sh┘
 ```
@@ -145,7 +145,7 @@ This flag is **macOS only**; on Linux/Windows it is a clean no-op. It:
   that runs `ntfy subscribe <NTFY_TOPIC> ~/.nudge/notify-mac.sh` with
   `RunAtLoad` + `KeepAlive`. An existing plist is preserved as
   `sh.ntfy.subscribe.plist.bak.YYYYMMDDHHMMSS`.
-- Loads the agent via `launchctl bootout` → `bootstrap` → `kickstart -k`.
+- Loads the agent via `launchctl bootout` → `bootstrap`.
 - Publishes a self-test message (`"nudge receiver installed"`) so you can
   confirm delivery.
 
@@ -181,7 +181,7 @@ into the tool's own config (or use the auto-wire flags above).
 
 | Tool        | Config file                  | Mechanism                          | "Done" event          | "Waiting" event       |
 | ----------- | ---------------------------- | ---------------------------------- | --------------------- | --------------------- |
-| Claude Code | `~/.claude/settings.json`    | hooks                              | `Stop`                | `Notification`        |
+| Claude Code | `~/.claude/settings.json`    | hooks                              | `Stop`                | (no waiting event)    |
 | Codex CLI   | `~/.codex/config.toml`       | `notify` + `[tui] notifications`   | `agent-turn-complete` | (no waiting event)    |
 | Gemini CLI  | `~/.gemini/settings.json`    | hooks                              | `AfterAgent`          | `Notification`        |
 
