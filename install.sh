@@ -75,7 +75,6 @@ wire_claude_settings() {
   local settings_file="${NUDGE_CLAUDE_SETTINGS:-${HOME}/.claude/settings.json}"
   local wrapper_path="${HOME}/.nudge/notify-claude.sh"
   local stop_cmd="${wrapper_path}"
-  local notif_cmd="${wrapper_path}"
 
   local manual_snippet_path="${SRC_DIR}/examples/claude-code.settings.json"
   local restart_notice="==> Claude Code reads settings.json at session start — restart your Claude Code session to load the new hooks."
@@ -98,7 +97,9 @@ wire_claude_settings() {
     return 0
   fi
 
-  # Missing file: create a minimal valid settings.json with both hook entries.
+  # Missing file: create a minimal valid settings.json with the Stop hook only.
+  # Stop-only contract: a Claude turn fires Stop once and (separately) Notification;
+  # wiring the nudge wrapper into both produces a duplicate banner per turn.
   if [[ ! -f "${settings_file}" ]]; then
     mkdir -p "$(dirname "${settings_file}")"
     local tmp_create
@@ -106,20 +107,16 @@ wire_claude_settings() {
     trap 'rm -f "${tmp_create}"' RETURN
     jq -n \
       --arg stop "${stop_cmd}" \
-      --arg notif "${notif_cmd}" \
       '{
         hooks: {
           Stop: [
             { matcher: "", hooks: [ { type: "command", command: $stop } ] }
-          ],
-          Notification: [
-            { matcher: "", hooks: [ { type: "command", command: $notif } ] }
           ]
         }
       }' > "${tmp_create}"
     mv "${tmp_create}" "${settings_file}"
     trap - RETURN
-    echo "==> Created ${settings_file} with nudge Stop + Notification hooks"
+    echo "==> Created ${settings_file} with nudge Stop hook"
     echo "${restart_notice}"
     return 0
   fi
@@ -130,13 +127,14 @@ wire_claude_settings() {
     return 0
   fi
 
-  # Idempotency probe: does either category already contain a notify-claude.sh
-  # or legacy /.nudge/notify.sh command? Either form counts as "already wired".
-  local has_stop has_notif
+  # Idempotency probe: does .hooks.Stop already contain a notify-claude.sh or
+  # legacy /.nudge/notify.sh command? Either form counts as "already wired".
+  # Stop-only contract: the probe ignores .hooks.Notification — pre-existing
+  # non-nudge Notification entries are preserved verbatim by the merge below.
+  local has_stop
   has_stop="$(jq '[.hooks.Stop[]?.hooks[]?.command // empty] | map(select(test("/\\.nudge/notify(-claude)?\\.sh"))) | length > 0' "${settings_file}")"
-  has_notif="$(jq '[.hooks.Notification[]?.hooks[]?.command // empty] | map(select(test("/\\.nudge/notify(-claude)?\\.sh"))) | length > 0' "${settings_file}")"
 
-  if [[ "${has_stop}" == "true" && "${has_notif}" == "true" ]]; then
+  if [[ "${has_stop}" == "true" ]]; then
     echo "==> ${settings_file} already wired for nudge — no changes made"
     return 0
   fi
@@ -153,18 +151,9 @@ wire_claude_settings() {
 
   jq \
     --arg stop "${stop_cmd}" \
-    --arg notif "${notif_cmd}" \
-    --argjson has_stop "${has_stop}" \
-    --argjson has_notif "${has_notif}" \
     '
     .hooks = ((.hooks // {}) | (
-      (if $has_stop then . else
-        .Stop = ((.Stop // []) + [ { matcher: "", hooks: [ { type: "command", command: $stop } ] } ])
-      end)
-      |
-      (if $has_notif then . else
-        .Notification = ((.Notification // []) + [ { matcher: "", hooks: [ { type: "command", command: $notif } ] } ])
-      end)
+      .Stop = ((.Stop // []) + [ { matcher: "", hooks: [ { type: "command", command: $stop } ] } ])
     ))
     ' "${settings_file}" > "${tmp_merge}"
 
