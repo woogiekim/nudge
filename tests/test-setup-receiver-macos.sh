@@ -424,11 +424,119 @@ STALE_EOF
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Scenario (f) — install.sh --setup-receiver-macos publishes self-test with
+#                --no-cache flag to the ntfy CLI.
+#
+# Spec: prd.md § F2 + Test contract T1 + T3
+# (Disable ntfy server-side cache for nudge publishes)
+#
+# Derived purely from PRD:
+#   Given the existing stub harness (PATH-prepended ntfy recorder),
+#   When install.sh --setup-receiver-macos runs to completion (rc == 0),
+#   Then ${home}/_shims/ntfy.calls contains a line whose argv includes the
+#        literal token `--no-cache`, the topic, and the self-test message
+#        `nudge receiver installed`.
+#   T3 negative: `--no-cache` appears exactly once, and no other unrecognized
+#                ntfy publish CLI flags appear beyond topic + message.
+#
+# Expected to FAIL on the unmodified install.sh (red phase).
+# ---------------------------------------------------------------------------
+scenario_f_self_test_no_cache_flag() {
+  echo "=== Scenario (f): self-test publish uses --no-cache ==="
+  SCENARIOS_RUN=$((SCENARIOS_RUN+1))
+
+  local home_dir
+  home_dir="$(make_fixture_home)"
+  local stub_dir
+  stub_dir="$(make_stub_bin "${home_dir}" "Darwin")"
+
+  printf 'NTFY_TOPIC="fixture-topic-abc"\n' > "${home_dir}/.nudge/.env"
+
+  local lad="${home_dir}/Library/LaunchAgents"
+  local ntfy_calls="${home_dir}/_shims/ntfy.calls"
+
+  set +e
+  HOME="${home_dir}" \
+    PATH="${stub_dir}:${PATH}" \
+    NUDGE_LAUNCHAGENTS_DIR="${lad}" \
+    NUDGE_BREW_CMD="${stub_dir}/brew" \
+    NUDGE_NTFY_CMD="${stub_dir}/ntfy" \
+    NUDGE_LAUNCHCTL_CMD="${stub_dir}/launchctl" \
+    NUDGE_OPEN_CMD="${stub_dir}/open" \
+    NUDGE_TN_CMD="${stub_dir}/terminal-notifier" \
+    NUDGE_PUBLISH_CMD="${stub_dir}/ntfy publish" \
+    bash "${INSTALL_SH}" --setup-receiver-macos >/dev/null 2>&1
+  local rc=$?
+  set -e
+
+  if [[ "${rc}" -ne 0 ]]; then
+    fail "(f) install.sh exited ${rc}, expected 0"
+    return
+  fi
+  pass "(f) install.sh exited 0"
+
+  if [[ ! -f "${ntfy_calls}" ]]; then
+    fail "(f) ntfy.calls file missing — publish stub was not invoked"
+    return
+  fi
+
+  # The publish call records each argv token on its own line. The expected
+  # tokens for the cache-aware publish are:
+  #   publish
+  #   --no-cache
+  #   fixture-topic-abc
+  #   nudge receiver installed
+  if grep -F -x -- "--no-cache" "${ntfy_calls}" >/dev/null 2>&1; then
+    pass "(f) ntfy.calls contains --no-cache"
+  else
+    fail "(f) ntfy.calls does NOT contain --no-cache"
+    echo "    --- ntfy.calls ---" >&2
+    cat "${ntfy_calls}" >&2
+    echo "    ------------------" >&2
+  fi
+
+  if grep -F -x -- "fixture-topic-abc" "${ntfy_calls}" >/dev/null 2>&1; then
+    pass "(f) ntfy.calls still contains the topic 'fixture-topic-abc'"
+  else
+    fail "(f) ntfy.calls missing topic 'fixture-topic-abc' (positional preserved?)"
+  fi
+
+  if grep -F -x -- "nudge receiver installed" "${ntfy_calls}" >/dev/null 2>&1; then
+    pass "(f) ntfy.calls still contains the self-test message"
+  else
+    fail "(f) ntfy.calls missing self-test message 'nudge receiver installed'"
+  fi
+
+  # T3 negative bound: `--no-cache` occurs exactly once.
+  local nc_count
+  nc_count="$(grep -c -F -x -- "--no-cache" "${ntfy_calls}" || true)"
+  if [[ "${nc_count}" -eq 1 ]]; then
+    pass "(f/T3) --no-cache token appears exactly once (count=${nc_count})"
+  else
+    fail "(f/T3) --no-cache token appears ${nc_count} times, expected exactly 1"
+  fi
+
+  # T3 negative bound: no other unrecognized ntfy publish flags. The only
+  # `--`-prefixed token that may appear is `--no-cache`. Any other long flag
+  # smuggled in by the implementer (e.g. `--quiet`, `--priority`, `--tag`)
+  # would violate "additive cache-disable only".
+  local other_flags
+  other_flags="$(awk '/^--/ && $0 != "--no-cache" { print }' "${ntfy_calls}" || true)"
+  if [[ -z "${other_flags}" ]]; then
+    pass "(f/T3) no unrecognized '--*' flags beyond --no-cache"
+  else
+    fail "(f/T3) unexpected extra '--*' flags present:"
+    echo "${other_flags}" >&2
+  fi
+}
+
 main() {
   scenario_a_non_darwin_guard
   scenario_b_missing_topic
   scenario_c_happy_path
   scenario_d_idempotent_rerun
+  scenario_f_self_test_no_cache_flag
 
   echo
   echo "Scenarios run: ${SCENARIOS_RUN}"

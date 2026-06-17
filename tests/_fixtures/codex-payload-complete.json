@@ -4,6 +4,6 @@
   "turn-id": "turn-7",
   "cwd": "__CWD_PLACEHOLDER__",
   "client": "codex-cli",
-  "input-messages": ["Fix the login bug in auth.py", "follow up"],
+  "input-messages": ["Fix the login bug in auth.py", "follow up", "Now add a regression test"],
   "last-assistant-message": "Done — pushed a fix."
 }
