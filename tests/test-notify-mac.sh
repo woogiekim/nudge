@@ -618,8 +618,10 @@ scenario_h_one_lf_subtitle_route() {
   # contained a literal LF would create a "stray" line in the log that does
   # NOT start with "ARG=" or "INVOCATION". The presence of such a stray line
   # is the red signal that the split did not happen.
+  # grep -c returns nonzero when count is 0, which would kill the script
+  # under `set -e`. Wrap in `|| true` and then default to 0.
   local stray
-  stray=$(grep -cvE '^(ARG=|INVOCATION$)' "${tn_calls}" 2>/dev/null | head -n 1 | tr -d '\n ')
+  stray=$( (grep -cvE '^(ARG=|INVOCATION$)' "${tn_calls}" 2>/dev/null || true) | head -n 1 | tr -d '\n ' )
   stray="${stray:-0}"
   if [[ "${stray}" -ne 0 ]]; then
     fail "(h) ${stray} non-ARG line(s) in tn.calls — implies an arg contained a raw LF (split did not run cleanly)"
