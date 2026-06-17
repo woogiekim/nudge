@@ -1,0 +1,3 @@
+{"type":"system","message":"session started"}
+{"type":"user","message":{"role":"user","content":"Please summarize the order flow"}}
+{"type":"user","message":{"role":"user","content":"<bash-input>echo hi</bash-input>"}}

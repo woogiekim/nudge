@@ -1,0 +1,4 @@
+{"type":"system","message":"session started"}
+{"type":"user","message":{"role":"user","content":"Please summarize the order flow"}}
+{"type":"user","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"# crew:run - Unified Task Orchestration\n\nRun one or more tasks…"}]}}
+{"type":"user","toolUseResult":{"stdout":"Launching skill: run"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":"Launching skill: run"}]}}
