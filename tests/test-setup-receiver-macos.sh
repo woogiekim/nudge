@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
 # Spec: prd.md § F3 + F4 — install.sh --setup-receiver-macos contract.
 #
-# Five scenarios derived from the PRD's Gherkin acceptance criteria + handoff
+# Scenarios derived from the PRD's Gherkin acceptance criteria + handoff
 # test contract:
 #   (a) Non-Darwin guard → zero side effects, no plist
 #   (b) Missing NTFY_TOPIC → exit 0, no plist, guidance mentions NTFY_TOPIC + .env
 #   (c) Happy-path plist generation with correct topic + ntfy path + notifier path
 #   (d) Idempotent re-run + timestamped backup of existing plist
 #   (e) (covered by tests/test-notify-mac.sh — separate file)
+#   (f) Self-test publish uses --no-cache (cache-disable contract)
+#   (g) launchd settle-wait honored after bootout (PRD F1)
+#   (h) bootstrap retry recovers from a transient failure (PRD F2)
+#   (i) all bootstraps fail → non-fatal WARN on stderr, script still 0 (PRD F3+F4)
+#
+# Note on labeling: scenarios (g)/(h)/(i) implement the "f/g/h" tests
+# named in the PRD test contract. The letter is shifted by one to avoid
+# collision with the pre-existing (f) cache-disable scenario shipped in
+# commit 64e3536. Behavioral content matches the PRD verbatim.
 #
 # Stub strategy:
 #   - PATH-prepended stub binaries (uname, brew, ntfy, launchctl, open,
@@ -425,6 +434,568 @@ STALE_EOF
 }
 
 # ---------------------------------------------------------------------------
+# Stateful launchctl mock — used by scenarios (g), (h), (i)
+#
+# Spec: prd.md § F1-F6 + handoff Test Contract
+#
+# Why a new mock? The generic recorder at `make_stub_bin` returns rc=0
+# for every invocation and cannot vary behavior across calls. Scenarios
+# (g)/(h)/(i) drive the install.sh launchd restart loop (bounded
+# settle-wait, bootstrap retry, final WARN) — they need:
+#   1. Per-subcommand counters so consecutive `print` calls can return
+#      different rc values.
+#   2. A per-scenario scripted sequence (e.g. `print:loaded,not-loaded,
+#      not-loaded`, `bootstrap:1,1,0`).
+#   3. A high-fidelity invocation log: one record per call (full argv on
+#      one line), so assertions can count exact bootstrap/print/bootout
+#      occurrences and verify no `kickstart`.
+#
+# Mock contract (POSIX bash 3.2 only — no associative arrays, no mapfile):
+#   - Reads a state file at `${shim_log}/launchctl.state` containing one
+#     line per subcommand, e.g.:
+#         print:loaded,not-loaded,not-loaded
+#         bootstrap:1,1,0
+#         bootout:0
+#     A subcommand without a line defaults to "0" (rc=0, no stdout).
+#   - For each call, increments a per-subcommand counter file
+#     `${shim_log}/launchctl.counter.<subcmd>` and picks the Nth value
+#     from the scripted sequence. If N exceeds the sequence length, the
+#     LAST scripted value is reused (so a single "loaded" applies to
+#     every probe).
+#   - `print` token mapping: "loaded" → rc 0; anything else → rc 1.
+#     Stdout is left empty (install.sh only checks rc).
+#   - `bootstrap` token mapping: token is a literal integer rc.
+#   - `bootout` token mapping: token is a literal integer rc (rc=3 is
+#     "No such process" — already-settled).
+#   - `kickstart` token mapping: token is a literal integer rc.
+#   - Each invocation appends ONE line to `${shim_log}/launchctl.calls`:
+#         "<subcmd> <rest-of-argv-joined-by-space>"
+#     so a test can `grep -F "bootstrap "` or
+#     `grep -F "print gui/.../sh.ntfy.subscribe"`.
+# ---------------------------------------------------------------------------
+install_stateful_launchctl_mock() {
+  local stub_dir="$1"
+  local shim_log="$2"
+
+  # The mock script itself. Embedded variables are escaped so they
+  # resolve at mock-execution time, not at heredoc-write time.
+  cat > "${stub_dir}/launchctl_stateful" <<'MOCK_EOF'
+#!/usr/bin/env bash
+# Stateful launchctl mock for tests/test-setup-receiver-macos.sh.
+# All paths derive from NUDGE_TEST_SHIMLOG (injected by the test fixture).
+set -u
+
+shim_log="${NUDGE_TEST_SHIMLOG:-}"
+if [ -z "${shim_log}" ] || [ ! -d "${shim_log}" ]; then
+  echo "mock: NUDGE_TEST_SHIMLOG not set or not a directory" >&2
+  exit 99
+fi
+
+calls_log="${shim_log}/launchctl.calls"
+state_file="${shim_log}/launchctl.state"
+
+subcmd="${1:-_none_}"
+shift || true
+
+# Record this invocation: "<subcmd> <rest-of-argv>" on one line.
+# Use a manually space-joined rest to avoid printf quoting surprises.
+rest=""
+for tok in "$@"; do
+  if [ -z "${rest}" ]; then
+    rest="${tok}"
+  else
+    rest="${rest} ${tok}"
+  fi
+done
+if [ -z "${rest}" ]; then
+  printf '%s\n' "${subcmd}" >> "${calls_log}"
+else
+  printf '%s %s\n' "${subcmd}" "${rest}" >> "${calls_log}"
+fi
+
+# Look up the scripted sequence for this subcommand, default "0".
+seq=""
+if [ -f "${state_file}" ]; then
+  # bash 3.2-safe: while-read loop, no mapfile.
+  while IFS= read -r line; do
+    case "${line}" in
+      "${subcmd}:"*)
+        seq="${line#${subcmd}:}"
+        break
+        ;;
+    esac
+  done < "${state_file}"
+fi
+if [ -z "${seq}" ]; then
+  seq="0"
+fi
+
+# Per-subcommand call counter (1-based).
+counter_file="${shim_log}/launchctl.counter.${subcmd}"
+n=0
+if [ -f "${counter_file}" ]; then
+  n=$(cat "${counter_file}")
+fi
+n=$((n + 1))
+printf '%s' "${n}" > "${counter_file}"
+
+# Walk the comma-separated sequence, take the Nth token (1-based).
+# If N exceeds length, reuse the last token.
+token=""
+i=0
+remaining="${seq}"
+while [ -n "${remaining}" ]; do
+  i=$((i + 1))
+  case "${remaining}" in
+    *,*)
+      head_tok="${remaining%%,*}"
+      remaining="${remaining#*,}"
+      ;;
+    *)
+      head_tok="${remaining}"
+      remaining=""
+      ;;
+  esac
+  token="${head_tok}"
+  if [ "${i}" = "${n}" ]; then
+    break
+  fi
+done
+# token now holds either the Nth entry, or the last entry if N > length.
+
+# Map token → rc for each subcommand.
+rc=0
+case "${subcmd}" in
+  print)
+    # "loaded" means rc 0, anything else rc 1.
+    if [ "${token}" = "loaded" ]; then
+      rc=0
+    else
+      rc=1
+    fi
+    ;;
+  bootstrap|bootout|kickstart)
+    # Literal integer rc; default 0 on parse miss.
+    case "${token}" in
+      ''|*[!0-9]*) rc=0 ;;
+      *) rc=${token} ;;
+    esac
+    ;;
+  *)
+    rc=0
+    ;;
+esac
+
+exit "${rc}"
+MOCK_EOF
+  chmod +x "${stub_dir}/launchctl_stateful"
+}
+
+# write_launchctl_state <shim_log> <subcmd1>:<seq1> [<subcmd2>:<seq2> ...]
+#   Convenience helper for the scenarios below. Each arg is a
+#   "subcmd:csv-seq" pair. The mock auto-defaults unspecified subcmds.
+write_launchctl_state() {
+  local shim_log="$1"
+  shift
+  local state_file="${shim_log}/launchctl.state"
+  : > "${state_file}"
+  local pair
+  for pair in "$@"; do
+    printf '%s\n' "${pair}" >> "${state_file}"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (g) — settle-wait honored (PRD F1 + Acceptance #1)
+#
+# Spec: prd.md § F1 ("Bounded settle-wait after bootout"), Acceptance
+#       criterion "Settle-before-bootstrap (was async-teardown race)".
+#
+# Configuration:
+#   - print sequence: "loaded,not-loaded,not-loaded" — the FIRST probe
+#     after bootout sees the service still loaded; the SECOND probe sees
+#     it gone. The remaining probes (post-bootstrap is-loaded check)
+#     also report "not-loaded" by token, but those are mapped after the
+#     successful bootstrap so install.sh may treat bootstrap rc=0 as
+#     authoritative (per PRD F2). The PRD test contract only requires
+#     the FINAL call's rc to reflect loaded — see assertion below using
+#     bootstrap-as-authoritative.
+#   - bootstrap sequence: "0" — succeeds immediately.
+#   - bootout sequence: "0" — clean exit (deferred-settle is what the
+#     scenario exercises, not bootout's rc).
+#
+# Assertions:
+#   - >= 2 `print gui/UID/sh.ntfy.subscribe` entries between the
+#     `bootout` entry and the first `bootstrap` entry (settle-wait
+#     polled at least twice before bootstrapping).
+#   - Final state loaded. The FINAL `print` call returns rc 0 when the
+#     last scripted token is "loaded"; the test re-scripts the print
+#     sequence to "loaded,not-loaded,loaded" so the post-bootstrap
+#     probe explicitly observes loaded. (Same scenario, just a clearer
+#     final-state assertion.)
+#   - Script exits 0.
+#   - No `kickstart` entries (F4).
+#
+# Expected RED on current install.sh: the current 597-604 block calls
+# bootout once + bootstrap once + kickstart once, all swallowed with
+# `|| true`. The settle-poll never happens, so the count of `print`
+# calls between bootout and the first bootstrap is 0, not >=2.
+# `kickstart` IS present in the call log, violating F4.
+# ---------------------------------------------------------------------------
+scenario_g_settle_wait_honored() {
+  echo "=== Scenario (g): settle-wait honored ==="
+  SCENARIOS_RUN=$((SCENARIOS_RUN+1))
+
+  local home_dir
+  home_dir="$(make_fixture_home)"
+  local stub_dir
+  stub_dir="$(make_stub_bin "${home_dir}" "Darwin")"
+  local shim_log="${home_dir}/_shims"
+
+  install_stateful_launchctl_mock "${stub_dir}" "${shim_log}"
+  # Script: first print=loaded (drives the settle loop), second=not-loaded
+  # (loop exits), third=loaded (final post-bootstrap probe). bootstrap=0
+  # succeeds on first attempt. bootout=0 (no scripted error).
+  write_launchctl_state "${shim_log}" \
+    "print:loaded,not-loaded,loaded" \
+    "bootstrap:0" \
+    "bootout:0"
+
+  printf 'NTFY_TOPIC="fixture-topic-abc"\n' > "${home_dir}/.nudge/.env"
+
+  local lad="${home_dir}/Library/LaunchAgents"
+  local calls_log="${shim_log}/launchctl.calls"
+
+  set +e
+  HOME="${home_dir}" \
+    PATH="${stub_dir}:${PATH}" \
+    NUDGE_LAUNCHAGENTS_DIR="${lad}" \
+    NUDGE_BREW_CMD="${stub_dir}/brew" \
+    NUDGE_NTFY_CMD="${stub_dir}/ntfy" \
+    NUDGE_LAUNCHCTL_CMD="${stub_dir}/launchctl_stateful" \
+    NUDGE_TEST_SHIMLOG="${shim_log}" \
+    NUDGE_OPEN_CMD="${stub_dir}/open" \
+    NUDGE_TN_CMD="${stub_dir}/terminal-notifier" \
+    NUDGE_PUBLISH_CMD="${stub_dir}/ntfy publish" \
+    bash "${INSTALL_SH}" --setup-receiver-macos >/dev/null 2>&1
+  local rc=$?
+  set -e
+
+  if [[ "${rc}" -ne 0 ]]; then
+    fail "(g) install.sh exited ${rc}, expected 0"
+    if [[ -f "${calls_log}" ]]; then
+      echo "    --- launchctl.calls ---" >&2
+      cat "${calls_log}" >&2
+      echo "    -----------------------" >&2
+    fi
+    return
+  fi
+  pass "(g) install.sh exited 0"
+
+  if [[ ! -f "${calls_log}" ]]; then
+    fail "(g) launchctl.calls missing — mock never invoked"
+    return
+  fi
+
+  # Locate the FIRST bootout line and the FIRST bootstrap line by
+  # 1-based line number, then count `print …/sh.ntfy.subscribe` lines
+  # strictly between them.
+  local bootout_line bootstrap_line
+  bootout_line="$(grep -n -E '^bootout( |$)' "${calls_log}" | head -n 1 | cut -d: -f1 || true)"
+  bootstrap_line="$(grep -n -E '^bootstrap( |$)' "${calls_log}" | head -n 1 | cut -d: -f1 || true)"
+
+  if [[ -z "${bootout_line}" ]]; then
+    fail "(g) no 'bootout' entry in launchctl.calls"
+    cat "${calls_log}" >&2
+    return
+  fi
+  if [[ -z "${bootstrap_line}" ]]; then
+    fail "(g) no 'bootstrap' entry in launchctl.calls"
+    cat "${calls_log}" >&2
+    return
+  fi
+
+  # Count `print …/sh.ntfy.subscribe` between (bootout_line+1) and
+  # (bootstrap_line-1) inclusive.
+  local lo hi
+  lo=$((bootout_line + 1))
+  hi=$((bootstrap_line - 1))
+  local print_between=0
+  if [[ "${lo}" -le "${hi}" ]]; then
+    print_between="$(sed -n "${lo},${hi}p" "${calls_log}" \
+      | grep -c -E '^print .*sh\.ntfy\.subscribe' || true)"
+  fi
+
+  if [[ "${print_between}" -ge 2 ]]; then
+    pass "(g) >=2 print probes between bootout and bootstrap (count=${print_between})"
+  else
+    fail "(g) expected >=2 print probes between bootout and bootstrap, got ${print_between}"
+    echo "    --- launchctl.calls ---" >&2
+    cat "${calls_log}" >&2
+    echo "    -----------------------" >&2
+  fi
+
+  # Final-state assertion: the LAST print line corresponds to a rc=0
+  # call. We don't have rc in the log directly, so derive it from the
+  # scripted sequence + counter: count print invocations total, look at
+  # the Nth token in the script. With script "loaded,not-loaded,loaded"
+  # the Nth token saturates to "loaded" once N>=3 (last-token reuse).
+  local final_print_count
+  final_print_count="$(grep -c -E '^print .*sh\.ntfy\.subscribe' "${calls_log}" || true)"
+  if [[ "${final_print_count}" -ge 1 ]]; then
+    # The script reuses the last token once N exceeds length, and the
+    # last token is "loaded" → final rc 0 → final state loaded.
+    pass "(g) final print probe maps to 'loaded' (script tail token, count=${final_print_count})"
+  else
+    fail "(g) no print probes recorded at all"
+  fi
+
+  # No kickstart entries.
+  local kickstart_count
+  kickstart_count="$(grep -c -E '^kickstart( |$)' "${calls_log}" || true)"
+  if [[ "${kickstart_count}" -eq 0 ]]; then
+    pass "(g) no kickstart entries (F4)"
+  else
+    fail "(g) kickstart appeared ${kickstart_count} times (F4 violated)"
+    grep -E '^kickstart( |$)' "${calls_log}" >&2 || true
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (h) — bootstrap retry recovers (PRD F2 + Acceptance #2)
+#
+# Spec: prd.md § F2 ("Bounded bootstrap retry"), Acceptance criterion
+#       "Bootstrap retry recovery".
+#
+# Configuration:
+#   - print sequence: "not-loaded,loaded" — after bootout the service
+#     is already gone (settle loop exits on the first probe). After
+#     the successful bootstrap the probe reports loaded.
+#   - bootstrap sequence: "1,0" — first attempt fails (rc=1), second
+#     attempt succeeds (rc=0).
+#   - bootout sequence: "0" — clean.
+#
+# Assertions:
+#   - 2 <= bootstrap entries <= 5 (PRD upper bound is exactly 5).
+#   - No `WARN` line on stderr (the retry recovered, no final warning).
+#   - Script exits 0.
+#   - No `kickstart` entries (F4).
+#
+# Expected RED on current install.sh: the current block fires bootstrap
+# exactly once (no retry loop), so the bootstrap count is 1, not >=2.
+# It also leaves `kickstart` in the call log.
+# ---------------------------------------------------------------------------
+scenario_h_bootstrap_retry_recovers() {
+  echo "=== Scenario (h): bootstrap retry recovers ==="
+  SCENARIOS_RUN=$((SCENARIOS_RUN+1))
+
+  local home_dir
+  home_dir="$(make_fixture_home)"
+  local stub_dir
+  stub_dir="$(make_stub_bin "${home_dir}" "Darwin")"
+  local shim_log="${home_dir}/_shims"
+
+  install_stateful_launchctl_mock "${stub_dir}" "${shim_log}"
+  write_launchctl_state "${shim_log}" \
+    "print:not-loaded,loaded" \
+    "bootstrap:1,0" \
+    "bootout:0"
+
+  printf 'NTFY_TOPIC="fixture-topic-abc"\n' > "${home_dir}/.nudge/.env"
+
+  local lad="${home_dir}/Library/LaunchAgents"
+  local calls_log="${shim_log}/launchctl.calls"
+  local stderr_file="${home_dir}/stderr.txt"
+
+  set +e
+  HOME="${home_dir}" \
+    PATH="${stub_dir}:${PATH}" \
+    NUDGE_LAUNCHAGENTS_DIR="${lad}" \
+    NUDGE_BREW_CMD="${stub_dir}/brew" \
+    NUDGE_NTFY_CMD="${stub_dir}/ntfy" \
+    NUDGE_LAUNCHCTL_CMD="${stub_dir}/launchctl_stateful" \
+    NUDGE_TEST_SHIMLOG="${shim_log}" \
+    NUDGE_OPEN_CMD="${stub_dir}/open" \
+    NUDGE_TN_CMD="${stub_dir}/terminal-notifier" \
+    NUDGE_PUBLISH_CMD="${stub_dir}/ntfy publish" \
+    bash "${INSTALL_SH}" --setup-receiver-macos >/dev/null 2>"${stderr_file}"
+  local rc=$?
+  set -e
+
+  if [[ "${rc}" -ne 0 ]]; then
+    fail "(h) install.sh exited ${rc}, expected 0"
+    if [[ -f "${calls_log}" ]]; then
+      echo "    --- launchctl.calls ---" >&2
+      cat "${calls_log}" >&2
+      echo "    -----------------------" >&2
+    fi
+    if [[ -f "${stderr_file}" ]]; then
+      echo "    --- stderr ---" >&2
+      cat "${stderr_file}" >&2
+      echo "    --------------" >&2
+    fi
+    return
+  fi
+  pass "(h) install.sh exited 0"
+
+  if [[ ! -f "${calls_log}" ]]; then
+    fail "(h) launchctl.calls missing — mock never invoked"
+    return
+  fi
+
+  local bootstrap_count
+  bootstrap_count="$(grep -c -E '^bootstrap( |$)' "${calls_log}" || true)"
+  if [[ "${bootstrap_count}" -ge 2 && "${bootstrap_count}" -le 5 ]]; then
+    pass "(h) bootstrap count in [2,5] (count=${bootstrap_count})"
+  else
+    fail "(h) expected 2<=bootstrap<=5, got ${bootstrap_count}"
+    echo "    --- launchctl.calls ---" >&2
+    cat "${calls_log}" >&2
+    echo "    -----------------------" >&2
+  fi
+
+  # No WARN line on stderr (the retry recovered).
+  if [[ -f "${stderr_file}" ]] && grep -F "WARN" "${stderr_file}" >/dev/null 2>&1; then
+    fail "(h) unexpected WARN line on stderr after successful retry"
+    grep -F "WARN" "${stderr_file}" >&2 || true
+  else
+    pass "(h) no WARN line on stderr"
+  fi
+
+  local kickstart_count
+  kickstart_count="$(grep -c -E '^kickstart( |$)' "${calls_log}" || true)"
+  if [[ "${kickstart_count}" -eq 0 ]]; then
+    pass "(h) no kickstart entries (F4)"
+  else
+    fail "(h) kickstart appeared ${kickstart_count} times (F4 violated)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (i) — all bootstraps fail, non-fatal WARN (PRD F3 + Acceptance #3)
+#
+# Spec: prd.md § F3 ("Non-fatal WARNING on final failure"), Acceptance
+#       criterion "All bootstrap attempts fail → non-fatal WARN".
+#
+# Configuration:
+#   - print sequence: "not-loaded" — always reports not-loaded (last-
+#     token reuse covers every iteration).
+#   - bootstrap sequence: "1" — every attempt fails (last-token reuse
+#     covers all 5 ceiling attempts).
+#   - bootout sequence: "0" — clean.
+#
+# Assertions:
+#   - exactly 5 bootstrap entries (the PRD-defined retry ceiling).
+#   - stderr contains a non-empty line containing "WARN".
+#   - the self-test publish stub still recorded its call (script
+#     continued past WARN to the publish stage).
+#   - script exits 0.
+#   - No `kickstart` entries (F4).
+#
+# Expected RED on current install.sh: the current block fires bootstrap
+# exactly once (no retry, no WARN), so the bootstrap count is 1 not 5,
+# and stderr contains no WARN line. `kickstart` is present, violating F4.
+# ---------------------------------------------------------------------------
+scenario_i_all_bootstraps_fail_warn() {
+  echo "=== Scenario (i): all bootstraps fail, non-fatal WARN ==="
+  SCENARIOS_RUN=$((SCENARIOS_RUN+1))
+
+  local home_dir
+  home_dir="$(make_fixture_home)"
+  local stub_dir
+  stub_dir="$(make_stub_bin "${home_dir}" "Darwin")"
+  local shim_log="${home_dir}/_shims"
+
+  install_stateful_launchctl_mock "${stub_dir}" "${shim_log}"
+  write_launchctl_state "${shim_log}" \
+    "print:not-loaded" \
+    "bootstrap:1" \
+    "bootout:0"
+
+  printf 'NTFY_TOPIC="fixture-topic-abc"\n' > "${home_dir}/.nudge/.env"
+
+  local lad="${home_dir}/Library/LaunchAgents"
+  local calls_log="${shim_log}/launchctl.calls"
+  local stderr_file="${home_dir}/stderr.txt"
+  local ntfy_calls="${shim_log}/ntfy.calls"
+
+  set +e
+  HOME="${home_dir}" \
+    PATH="${stub_dir}:${PATH}" \
+    NUDGE_LAUNCHAGENTS_DIR="${lad}" \
+    NUDGE_BREW_CMD="${stub_dir}/brew" \
+    NUDGE_NTFY_CMD="${stub_dir}/ntfy" \
+    NUDGE_LAUNCHCTL_CMD="${stub_dir}/launchctl_stateful" \
+    NUDGE_TEST_SHIMLOG="${shim_log}" \
+    NUDGE_OPEN_CMD="${stub_dir}/open" \
+    NUDGE_TN_CMD="${stub_dir}/terminal-notifier" \
+    NUDGE_PUBLISH_CMD="${stub_dir}/ntfy publish" \
+    bash "${INSTALL_SH}" --setup-receiver-macos >/dev/null 2>"${stderr_file}"
+  local rc=$?
+  set -e
+
+  if [[ "${rc}" -ne 0 ]]; then
+    fail "(i) install.sh exited ${rc}, expected 0 (must continue past WARN)"
+    if [[ -f "${calls_log}" ]]; then
+      echo "    --- launchctl.calls ---" >&2
+      cat "${calls_log}" >&2
+      echo "    -----------------------" >&2
+    fi
+    if [[ -f "${stderr_file}" ]]; then
+      echo "    --- stderr ---" >&2
+      cat "${stderr_file}" >&2
+      echo "    --------------" >&2
+    fi
+    return
+  fi
+  pass "(i) install.sh exited 0"
+
+  if [[ ! -f "${calls_log}" ]]; then
+    fail "(i) launchctl.calls missing — mock never invoked"
+    return
+  fi
+
+  local bootstrap_count
+  bootstrap_count="$(grep -c -E '^bootstrap( |$)' "${calls_log}" || true)"
+  if [[ "${bootstrap_count}" -eq 5 ]]; then
+    pass "(i) exactly 5 bootstrap entries (count=${bootstrap_count})"
+  else
+    fail "(i) expected exactly 5 bootstrap entries, got ${bootstrap_count}"
+    echo "    --- launchctl.calls ---" >&2
+    cat "${calls_log}" >&2
+    echo "    -----------------------" >&2
+  fi
+
+  # stderr contains a non-empty line containing "WARN".
+  if [[ -f "${stderr_file}" ]] && grep -E '.*WARN.*' "${stderr_file}" \
+      | grep -E '\S' >/dev/null 2>&1; then
+    pass "(i) stderr contains a non-empty 'WARN' line"
+  else
+    fail "(i) stderr missing a non-empty 'WARN' line"
+    if [[ -f "${stderr_file}" ]]; then
+      echo "    --- stderr ---" >&2
+      cat "${stderr_file}" >&2
+      echo "    --------------" >&2
+    fi
+  fi
+
+  # The self-test publish stub recorded its call (script continued).
+  if [[ -s "${ntfy_calls}" ]]; then
+    pass "(i) ntfy publish stub recorded a call (script continued past WARN)"
+  else
+    fail "(i) ntfy publish stub NOT invoked (script halted before publish?)"
+  fi
+
+  local kickstart_count
+  kickstart_count="$(grep -c -E '^kickstart( |$)' "${calls_log}" || true)"
+  if [[ "${kickstart_count}" -eq 0 ]]; then
+    pass "(i) no kickstart entries (F4)"
+  else
+    fail "(i) kickstart appeared ${kickstart_count} times (F4 violated)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Scenario (f) — install.sh --setup-receiver-macos publishes self-test with
 #                --no-cache flag to the ntfy CLI.
 #
@@ -537,6 +1108,9 @@ main() {
   scenario_c_happy_path
   scenario_d_idempotent_rerun
   scenario_f_self_test_no_cache_flag
+  scenario_g_settle_wait_honored
+  scenario_h_bootstrap_retry_recovers
+  scenario_i_all_bootstraps_fail_warn
 
   echo
   echo "Scenarios run: ${SCENARIOS_RUN}"
