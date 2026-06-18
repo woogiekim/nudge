@@ -29,16 +29,18 @@ tool exposes; the core ntfy delivery never changes.
 ### Notification format
 
 ```
-🤖 {Tool} · {project}                       (title line)
-{event} · {gitBranch}                        (line 2)
-💬 {aiTitle or last user prompt, ≤70 chars}  (line 3 — omitted if absent)
+🤖 {Tool} · {project}            (title line)
+{event} · {gitBranch}            (line 2)
+Q: {question}                    (omitted when empty)
+A: {assistant answer}            (omitted when empty)
 ```
 
 - `{Tool}` is `Claude Code` / `Codex CLI` / `Gemini CLI`.
 - `{project}` is the basename of the project directory the AI was running in.
 - `{event}` is `Response complete`, `Waiting for your input`, `Task complete`, etc.
 - `{gitBranch}` is omitted (no `· branch`) when the dir is not a git repo.
-- Line 3 (`💬 …`) is omitted if no question/title can be extracted.
+- `Q: {question}` carries the user's last question (or extracted AI title). It is omitted when empty and truncated to the `NUDGE_MAX_Q` codepoint cap (default `80`).
+- `A: {assistant answer}` carries the assistant's most recent answer. It is omitted when empty and truncated to the `NUDGE_MAX_A` codepoint cap (default `120`).
 
 ## 📁 Project structure
 
@@ -195,10 +197,12 @@ The auto-wire installers already write absolute paths.
 
 - ntfy.sh topics are **public**: anyone who knows the topic name can read or
   send to it. Use a long, random topic name (the `.env.example` explains this).
-- Notifications carry the user's last question / AI title in line 3. If those
-  may contain secrets, configure the wrappers to skip line 3 (e.g. by clearing
-  `$QUESTION` in your own fork), or self-host ntfy behind a private network
-  such as Tailscale.
+- Notifications carry the user's last question on the `Q:` line **and** the
+  assistant's most recent answer on the `A:` line. Either may contain
+  secrets. If that is a concern, configure the wrappers to skip both lines
+  (e.g. by clearing `$QUESTION` and `$ANSWER` in your own fork of
+  `notify-claude.sh` / `notify-codex.sh`), or self-host ntfy behind a
+  private network such as Tailscale.
 - For full privacy, self-host ntfy and set `NTFY_SERVER` to your own instance.
 
 ## ⚠️ Caveats and uncertainty
