@@ -81,6 +81,37 @@ bash test.sh
 default. Wire them up either manually (snippets in `examples/`) or opt-in to
 the auto-wire flags below.
 
+### Quick install (no clone)
+
+If you'd rather not `git clone` first, pipe `install.sh` straight from GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/woogiekim/nudge/main/install.sh | bash -s -- --wire-all
+```
+
+macOS variant (also provisions the headless ntfy receiver):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/woogiekim/nudge/main/install.sh | bash -s -- --wire-all --setup-receiver-macos
+```
+
+The script auto-detects that no checkout sits next to it and self-fetches the
+seven nudge scripts plus `.env.example` from the same raw base URL into
+`~/.nudge/`. After install you still need to:
+
+1. Set `NTFY_TOPIC` to a long random string in `~/.nudge/.env`.
+2. Subscribe to that same topic in the ntfy app (iOS / Android / desktop / web).
+
+The existing `git clone` + `bash install.sh` flow remains fully supported and
+is recommended for contributors. To target a fork or branch (e.g. for a
+self-hosted mirror or a feature branch), point the one-liner at a different
+raw base URL:
+
+```bash
+NUDGE_RAW_BASE_URL=https://raw.githubusercontent.com/<fork>/nudge/<ref> \
+  curl -fsSL "${NUDGE_RAW_BASE_URL}/install.sh" | bash -s -- --wire-all
+```
+
 ### Opt-in auto-wiring
 
 ```bash

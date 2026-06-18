@@ -21,6 +21,42 @@ set -euo pipefail
 INSTALL_DIR="${HOME}/.nudge"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Raw base URL for self-fetch (no-clone curl|bash install). Override to point
+# at a fork/branch: NUDGE_RAW_BASE_URL=https://raw.githubusercontent.com/<fork>/nudge/<ref>
+NUDGE_RAW_BASE_URL="${NUDGE_RAW_BASE_URL:-https://raw.githubusercontent.com/woogiekim/nudge/main}"
+
+# Fetch helper: downloads one URL to one destination using (in order):
+#   1. NUDGE_FETCH_CMD (alias NUDGE_CURL_CMD) — test/override hook.
+#      Contract: invoked as `"${cmd}" <url> <dest>`; writes non-empty content
+#      to <dest> and exits 0 on success; exits non-zero on failure.
+#   2. curl -fsSL "${url}" -o "${dest}" — default when curl is on PATH.
+#   3. wget -q -O "${dest}" "${url}"   — fallback when curl is absent.
+# After the fetcher returns, verifies the destination exists and is non-empty.
+# Any failure aborts the install with a clear stderr message.
+nudge_fetch_one() {
+  local url="$1"
+  local dest="$2"
+  local fetch_cmd="${NUDGE_FETCH_CMD:-${NUDGE_CURL_CMD:-}}"
+  local rc=0
+
+  if [[ -n "${fetch_cmd}" ]]; then
+    "${fetch_cmd}" "${url}" "${dest}" || rc=$?
+  elif command -v curl >/dev/null 2>&1; then
+    curl -fsSL "${url}" -o "${dest}" || rc=$?
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "${dest}" "${url}" || rc=$?
+  else
+    echo "error: neither curl nor wget available" >&2
+    echo "       install one of them and re-run, or set NUDGE_FETCH_CMD to a custom fetcher" >&2
+    exit 1
+  fi
+
+  if [[ "${rc}" -ne 0 ]] || [[ ! -s "${dest}" ]]; then
+    echo "error: failed to fetch ${url} -> ${dest}" >&2
+    exit 1
+  fi
+}
+
 # --- CLI flag parsing -------------------------------------------------------
 WIRE_CLAUDE=0
 WIRE_CODEX=0
@@ -87,6 +123,8 @@ wire_claude_settings() {
     echo "    --- begin snippet ---"
     if [[ -f "${manual_snippet_path}" ]]; then
       cat "${manual_snippet_path}"
+    else
+      echo "    (example snippet not available in self-fetch mode — see ${NUDGE_RAW_BASE_URL}/examples/claude-code.settings.json)"
     fi
     echo "    --- end snippet ---"
   }
@@ -383,6 +421,8 @@ wire_gemini_settings() {
     echo "    --- begin snippet ---"
     if [[ -f "${manual_snippet_path}" ]]; then
       cat "${manual_snippet_path}"
+    else
+      echo "    (example snippet not available in self-fetch mode — see ${NUDGE_RAW_BASE_URL}/examples/gemini.settings.json)"
     fi
     echo "    --- end snippet ---"
   }
@@ -684,18 +724,44 @@ DUP_EOF
 echo "==> Installing nudge to ${INSTALL_DIR}"
 mkdir -p "${INSTALL_DIR}"
 
+# Canonical files installed by the core copy loop.
+NUDGE_CORE_SCRIPTS=(notify.sh notify-claude.sh notify-codex.sh notify-codex-turn-start.sh notify-gemini.sh notify-mac.sh _nudge_lib.sh)
+
+# Sibling-presence detection: when running from a local checkout, the canonical
+# sibling files sit next to install.sh. Under `curl ... | bash`, BASH_SOURCE[0]
+# resolves to the pipe (e.g. /dev/fd/N) so ${SRC_DIR} points somewhere that
+# does not contain notify.sh / _nudge_lib.sh — trigger self-fetch instead.
+if [[ -f "${SRC_DIR}/notify.sh" && -f "${SRC_DIR}/_nudge_lib.sh" ]]; then
+  # Local-checkout path — preserved byte-for-byte (zero behavior change).
+  STAGE_DIR="${SRC_DIR}"
+else
+  # Self-fetch path — download each canonical file into a staging dir, then
+  # let the existing for-loop and .env guard read from STAGE_DIR.
+  STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nudge-selffetch.XXXXXX")"
+  trap 'rm -rf "${STAGE_DIR}"' EXIT
+  echo "==> Self-fetch mode: siblings not found next to install.sh — fetching from ${NUDGE_RAW_BASE_URL}"
+  for src in "${NUDGE_CORE_SCRIPTS[@]}" .env.example; do
+    echo "==> Fetching ${src} from ${NUDGE_RAW_BASE_URL}"
+    nudge_fetch_one "${NUDGE_RAW_BASE_URL}/${src}" "${STAGE_DIR}/${src}"
+  done
+  # chmod +x each fetched script (matches the local-copy +x at install time).
+  for src in "${NUDGE_CORE_SCRIPTS[@]}"; do
+    chmod +x "${STAGE_DIR}/${src}"
+  done
+fi
+
 # Copy core + all per-tool wrappers + shared lib + macOS notifier + Codex
 # UserPromptSubmit hook.
-for src in notify.sh notify-claude.sh notify-codex.sh notify-codex-turn-start.sh notify-gemini.sh notify-mac.sh _nudge_lib.sh; do
-  if [[ -f "${SRC_DIR}/${src}" ]]; then
-    cp "${SRC_DIR}/${src}" "${INSTALL_DIR}/${src}"
+for src in "${NUDGE_CORE_SCRIPTS[@]}"; do
+  if [[ -f "${STAGE_DIR}/${src}" ]]; then
+    cp "${STAGE_DIR}/${src}" "${INSTALL_DIR}/${src}"
     chmod +x "${INSTALL_DIR}/${src}"
   fi
 done
 
 # Create .env only if it does not already exist (never overwrite your config)
 if [[ ! -f "${INSTALL_DIR}/.env" ]]; then
-  cp "${SRC_DIR}/.env.example" "${INSTALL_DIR}/.env"
+  cp "${STAGE_DIR}/.env.example" "${INSTALL_DIR}/.env"
   echo "==> Created ${INSTALL_DIR}/.env  (edit it and set NTFY_TOPIC)"
 else
   echo "==> ${INSTALL_DIR}/.env already exists — left untouched"
