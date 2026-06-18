@@ -25,6 +25,13 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # at a fork/branch: NUDGE_RAW_BASE_URL=https://raw.githubusercontent.com/<fork>/nudge/<ref>
 NUDGE_RAW_BASE_URL="${NUDGE_RAW_BASE_URL:-https://raw.githubusercontent.com/woogiekim/nudge/main}"
 
+# Receiver-skip signal flag. setup_receiver_macos() flips this to 1 when the
+# macOS receiver provisioning is short-circuited because NTFY_TOPIC is empty,
+# so the Next-steps block at the tail of install.sh can render an extra
+# WARNING. Declared up-front (default 0) so the tail reference stays safe
+# under `set -u`.
+NUDGE_RECEIVER_SKIPPED=0
+
 # Fetch helper: downloads one URL to one destination using (in order):
 #   1. NUDGE_FETCH_CMD (alias NUDGE_CURL_CMD) — test/override hook.
 #      Contract: invoked as `"${cmd}" <url> <dest>`; writes non-empty content
@@ -546,9 +553,16 @@ setup_receiver_macos() {
   fi
 
   if [[ -z "${topic}" ]]; then
+    # LOUD stderr WARNING — the operator grep marker for this skip path.
+    # Keep the original stdout informational echoes too (they help users
+    # who eyeball install output), but the authoritative signal lives on
+    # stderr alongside other install-time warnings.
     echo "==> setup-receiver-macos: NTFY_TOPIC is not set."
     echo "    Edit ${env_file} and set NTFY_TOPIC to a unique value first,"
     echo "    then re-run: bash install.sh --setup-receiver-macos"
+    echo "WARNING: setup-receiver-macos skipped — NTFY_TOPIC is empty in ${env_file}. Edit ${env_file}, set NTFY_TOPIC, then re-run: bash install.sh --setup-receiver-macos" >&2
+
+    NUDGE_RECEIVER_SKIPPED=1
     return 0
   fi
 
@@ -725,7 +739,7 @@ echo "==> Installing nudge to ${INSTALL_DIR}"
 mkdir -p "${INSTALL_DIR}"
 
 # Canonical files installed by the core copy loop.
-NUDGE_CORE_SCRIPTS=(notify.sh notify-claude.sh notify-codex.sh notify-codex-turn-start.sh notify-gemini.sh notify-mac.sh _nudge_lib.sh)
+NUDGE_CORE_SCRIPTS=(notify.sh notify-claude.sh notify-codex.sh notify-codex-turn-start.sh notify-gemini.sh notify-mac.sh _nudge_lib.sh test.sh)
 
 # Sibling-presence detection: when running from a local checkout, the canonical
 # sibling files sit next to install.sh. Under `curl ... | bash`, BASH_SOURCE[0]
@@ -795,3 +809,16 @@ Next steps:
   5. macOS users: rerun with --setup-receiver-macos to receive notifications
      natively in Notification Center without the ntfy GUI app.
 EOF
+
+# Receiver-skipped advisory: when --setup-receiver-macos was requested but
+# short-circuited because NTFY_TOPIC was empty, repeat the warning at the
+# tail of the install transcript so it is impossible to miss between the
+# happy-path Next-steps block and the shell prompt.
+if [[ "${NUDGE_RECEIVER_SKIPPED}" -eq 1 ]]; then
+  cat <<WARN_EOF
+
+WARNING: macOS receiver was NOT provisioned because NTFY_TOPIC is empty.
+  Edit ${INSTALL_DIR}/.env, set NTFY_TOPIC to a unique value, and re-run:
+      bash install.sh --setup-receiver-macos
+WARN_EOF
+fi

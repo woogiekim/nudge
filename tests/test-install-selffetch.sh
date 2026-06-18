@@ -64,7 +64,9 @@ mkroot() {
   printf '%s' "${d}"
 }
 
-# The 7 sibling .sh files the install loop copies, plus .env.example.
+# The 8 sibling .sh files the install loop copies, plus .env.example.
+# Spec: prd.md § F4 — test.sh MUST be part of NUDGE_CORE_SCRIPTS so it
+# lands at ~/.nudge/test.sh in both clone and self-fetch installs.
 SIBLING_SCRIPTS=(
   "notify.sh"
   "notify-claude.sh"
@@ -73,6 +75,7 @@ SIBLING_SCRIPTS=(
   "notify-gemini.sh"
   "notify-mac.sh"
   "_nudge_lib.sh"
+  "test.sh"
 )
 SIBLING_ALL=("${SIBLING_SCRIPTS[@]}" ".env.example")
 
@@ -239,11 +242,14 @@ scenario_a_siblings_present_no_fetch() {
 }
 
 # ---------------------------------------------------------------------------
-# Scenario B — siblings ABSENT → self-fetch invoked exactly 8 times with
-# URLs prefixed by NUDGE_RAW_BASE_URL/; all 7 scripts installed and +x.
+# Scenario B — siblings ABSENT → self-fetch invoked exactly 9 times with
+# URLs prefixed by NUDGE_RAW_BASE_URL/; all 8 scripts installed and +x.
+#
+# Spec: prd.md § F4 — test.sh is part of NUDGE_CORE_SCRIPTS, so the count
+# becomes 9 (8 .sh + .env.example) and one fetched URL ends in "/test.sh".
 # ---------------------------------------------------------------------------
 scenario_b_siblings_absent_self_fetch() {
-  echo "=== Scenario B: siblings ABSENT → 8 fetches (7 scripts + .env.example) ==="
+  echo "=== Scenario B: siblings ABSENT → 9 fetches (8 scripts + .env.example) ==="
   SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
 
   local root home_dir src_dir stub_dir calls_log counter_file
@@ -278,10 +284,10 @@ scenario_b_siblings_absent_self_fetch() {
 
   local invocations
   invocations="$(counter_value "${counter_file}")"
-  if [[ "${invocations}" -eq 8 ]]; then
-    pass "B fetch stub invoked exactly 8 times (7 scripts + .env.example)"
+  if [[ "${invocations}" -eq 9 ]]; then
+    pass "B fetch stub invoked exactly 9 times (8 scripts + .env.example)"
   else
-    fail "B fetch stub invoked ${invocations} time(s); expected 8"
+    fail "B fetch stub invoked ${invocations} time(s); expected 9"
     if [[ -f "${calls_log}" ]]; then
       echo "    --- recorded fetch calls ---" >&2
       sed 's/^/    /' "${calls_log}" >&2
@@ -306,7 +312,36 @@ scenario_b_siblings_absent_self_fetch() {
     fail "B ${bad_prefix} URL(s) did not start with '${prefix}'"
   fi
 
-  # Each of the 7 sibling .sh files must appear (once) among the URLs.
+  # Spec: prd.md § F4 — exactly one of the fetched URLs must end in "/test.sh"
+  # so that ${INSTALL_DIR}/test.sh lands in self-fetch (no-clone) installs.
+  local test_sh_url_hits
+  test_sh_url_hits="$(grep -c -F -- "${prefix}test.sh"$'\t' "${calls_log}" 2>/dev/null || true)"
+  if [[ "${test_sh_url_hits}" -eq 1 ]]; then
+    pass "B URL ${prefix}test.sh fetched exactly once"
+  else
+    fail "B URL ${prefix}test.sh fetched ${test_sh_url_hits} time(s); expected 1"
+    if [[ -f "${calls_log}" ]]; then
+      echo "    --- recorded fetch calls ---" >&2
+      sed 's/^/    /' "${calls_log}" >&2
+      echo "    ----------------------------" >&2
+    fi
+  fi
+
+  # Spec: prd.md § F4 — ${INSTALL_DIR}/test.sh must exist, be a regular file,
+  # and be executable after the self-fetch install completes.
+  local installed_test_sh="${home_dir}/.nudge/test.sh"
+  if [[ -f "${installed_test_sh}" ]]; then
+    pass "B test.sh installed at ${installed_test_sh}"
+    if [[ -x "${installed_test_sh}" ]]; then
+      pass "B test.sh installed and executable (+x)"
+    else
+      fail "B test.sh installed but NOT executable (+x)"
+    fi
+  else
+    fail "B test.sh NOT installed at ${installed_test_sh}"
+  fi
+
+  # Each of the 8 sibling .sh files must appear (once) among the URLs.
   local missing_urls=0 script
   for script in "${SIBLING_SCRIPTS[@]}"; do
     local hits

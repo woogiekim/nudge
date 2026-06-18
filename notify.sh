@@ -32,15 +32,28 @@ fi
 NTFY_TOPIC="${_ENV_TOPIC:-${NTFY_TOPIC:-}}"
 NTFY_SERVER="${_ENV_SERVER:-${NTFY_SERVER:-https://ntfy.sh}}"
 
-# Fail soft: if not configured, warn to stderr but do NOT block the agent.
-if [[ -z "${NTFY_TOPIC}" ]]; then
-  echo "nudge: NTFY_TOPIC is not set (edit .env or export NTFY_TOPIC). Skipping." >&2
-  exit 0
-fi
-
+# Argument defaults. Lifted above the skip branch so the trace-log line
+# emitted on empty NTFY_TOPIC can reference TITLE/MESSAGE without depending
+# on whether the script reached the curl call.
 TITLE="${1:-AI Agent}"      # arg 1: notification title
 MESSAGE="${2:-Done}"        # arg 2: notification body
 PRIORITY="${3:-default}"    # arg 3: ntfy priority (optional)
+
+# Fail soft: if not configured, warn to stderr but do NOT block the agent.
+if [[ -z "${NTFY_TOPIC}" ]]; then
+  echo "nudge: NTFY_TOPIC is not set (edit .env or export NTFY_TOPIC). Skipping." >&2
+
+  # Best-effort trace log: record that a notification was dropped so an
+  # operator can grep ~/.nudge/notify.log after the fact. Wrapped in
+  # `|| true` so a read-only $HOME, a full disk, or any other filesystem
+  # error cannot break the calling AI tool's hook contract.
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  mkdir -p "${HOME}/.nudge" 2>/dev/null || true
+  printf "%s | NTFY_TOPIC empty — notification skipped (TITLE='%s' MSG='%s')\n" \
+    "${ts}" "${TITLE}" "${MESSAGE}" >> "${HOME}/.nudge/notify.log" 2>/dev/null || true
+
+  exit 0
+fi
 
 # Send the push to ntfy. Never let a network error break the calling tool.
 curl -s \

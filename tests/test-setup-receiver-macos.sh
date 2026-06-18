@@ -209,9 +209,15 @@ scenario_b_missing_topic() {
 
   printf 'NTFY_TOPIC=""\n' > "${home_dir}/.nudge/.env"
 
-  local output
+  # Spec: prd.md § F1 + F2 — capture stdout and stderr separately so we can
+  # assert (a) stderr WARNING line from the guard at install.sh:548–553 and
+  # (b) Next-steps WARNING block emitted to stdout at install.sh:785–797.
+  local stdout_file="${home_dir}/stdout.txt"
+  local stderr_file="${home_dir}/stderr.txt"
+  local combined_file="${home_dir}/combined.txt"
+
   set +e
-  output="$(HOME="${home_dir}" \
+  HOME="${home_dir}" \
     PATH="${stub_dir}:${PATH}" \
     NUDGE_LAUNCHAGENTS_DIR="${home_dir}/Library/LaunchAgents" \
     NUDGE_BREW_CMD="${stub_dir}/brew" \
@@ -219,9 +225,16 @@ scenario_b_missing_topic() {
     NUDGE_LAUNCHCTL_CMD="${stub_dir}/launchctl" \
     NUDGE_OPEN_CMD="${stub_dir}/open" \
     NUDGE_TN_CMD="${stub_dir}/terminal-notifier" \
-    bash "${INSTALL_SH}" --setup-receiver-macos 2>&1)"
+    bash "${INSTALL_SH}" --setup-receiver-macos \
+    >"${stdout_file}" 2>"${stderr_file}"
   local rc=$?
   set -e
+
+  # Build the combined (stdout+stderr) view used by existing legacy
+  # assertions and the new Next-steps WARNING block assertion.
+  cat "${stdout_file}" "${stderr_file}" > "${combined_file}"
+  local output
+  output="$(cat "${combined_file}")"
 
   if [[ "${rc}" -ne 0 ]]; then
     fail "(b) install.sh exited ${rc}, expected 0"
@@ -242,6 +255,57 @@ scenario_b_missing_topic() {
     pass "(b) output mentions .env"
   else
     fail "(b) output missing .env reference"
+  fi
+
+  # Spec: prd.md § F1 — stderr from the empty-NTFY_TOPIC guard MUST contain
+  # a literal "WARNING:" line that mentions NTFY_TOPIC. This is the operator
+  # grep marker for the receiver-skip path.
+  if grep -E '^.*WARNING:.*NTFY_TOPIC' "${stderr_file}" >/dev/null 2>&1; then
+    pass "(b) stderr contains 'WARNING:' line mentioning NTFY_TOPIC"
+  else
+    fail "(b) stderr missing 'WARNING:' line mentioning NTFY_TOPIC"
+    echo "    --- stderr ---" >&2
+    cat "${stderr_file}" >&2
+    echo "    --------------" >&2
+  fi
+
+  # Spec: prd.md § F2 — the final installer output (combined stdout+stderr)
+  # MUST contain a prominent "WARNING:" block in or alongside the Next-steps
+  # section. The block must explicitly state the macOS receiver was NOT
+  # provisioned because NTFY_TOPIC is empty, and must mention the re-run
+  # command, NTFY_TOPIC, and the .env path.
+  if grep -F "WARNING:" "${combined_file}" >/dev/null 2>&1; then
+    pass "(b) combined output contains a 'WARNING:' block"
+  else
+    fail "(b) combined output missing a 'WARNING:' block"
+    echo "    --- combined ---" >&2
+    cat "${combined_file}" >&2
+    echo "    ----------------" >&2
+  fi
+
+  # The Next-steps WARNING block must explicitly state "not provisioned"
+  # (or equivalently "NOT provisioned" / "was not provisioned"). The PRD
+  # requires the block to communicate that the macOS receiver did not get
+  # set up. Accept a case-insensitive "not provisioned" match.
+  if grep -iE 'not.{0,3}provisioned' "${combined_file}" >/dev/null 2>&1; then
+    pass "(b) WARNING block states macOS receiver was not provisioned"
+  else
+    fail "(b) WARNING block missing 'not provisioned' phrasing"
+    echo "    --- combined ---" >&2
+    cat "${combined_file}" >&2
+    echo "    ----------------" >&2
+  fi
+
+  # The WARNING block must guide the operator to the re-run command and to
+  # the .env path so they can fix the empty NTFY_TOPIC and re-run.
+  if grep -F -- "bash install.sh --setup-receiver-macos" "${combined_file}" \
+      >/dev/null 2>&1; then
+    pass "(b) WARNING block names the re-run command"
+  else
+    fail "(b) WARNING block missing re-run command 'bash install.sh --setup-receiver-macos'"
+    echo "    --- combined ---" >&2
+    cat "${combined_file}" >&2
+    echo "    ----------------" >&2
   fi
 }
 
