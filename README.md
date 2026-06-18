@@ -18,7 +18,7 @@ parses the tool's hook payload (project dir, git branch, latest user prompt
 or AI title) and then hands a context-rich title + message to `notify.sh`.
 
 ```
-Claude Code (Stop / Notification hook) ─→ notify-claude.sh ┐
+Claude Code (Stop hook) ─→ notify-claude.sh ┐
 Codex CLI   (notify program, JSON argv) ─→ notify-codex.sh ├─→ notify.sh ─→ ntfy.sh/<topic> ─→ phone / desktop
 Gemini CLI  (AfterAgent / Notification) ─→ notify-gemini.sh┘
 ```
@@ -29,16 +29,18 @@ tool exposes; the core ntfy delivery never changes.
 ### Notification format
 
 ```
-🤖 {Tool} · {project}                       (title line)
-{event} · {gitBranch}                        (line 2)
-💬 {aiTitle or last user prompt, ≤70 chars}  (line 3 — omitted if absent)
+🤖 {Tool} · {project}            (title line)
+{event} · {gitBranch}            (line 2)
+Q: {question}                    (omitted when empty)
+A: {assistant answer}            (omitted when empty)
 ```
 
 - `{Tool}` is `Claude Code` / `Codex CLI` / `Gemini CLI`.
 - `{project}` is the basename of the project directory the AI was running in.
 - `{event}` is `Response complete`, `Waiting for your input`, `Task complete`, etc.
 - `{gitBranch}` is omitted (no `· branch`) when the dir is not a git repo.
-- Line 3 (`💬 …`) is omitted if no question/title can be extracted.
+- `Q: {question}` carries the user's last question (or extracted AI title). It is omitted when empty and truncated to the `NUDGE_MAX_Q` codepoint cap (default `80`).
+- `A: {assistant answer}` carries the assistant's most recent answer. It is omitted when empty and truncated to the `NUDGE_MAX_A` codepoint cap (default `120`).
 
 ## 📁 Project structure
 
@@ -145,7 +147,7 @@ This flag is **macOS only**; on Linux/Windows it is a clean no-op. It:
   that runs `ntfy subscribe <NTFY_TOPIC> ~/.nudge/notify-mac.sh` with
   `RunAtLoad` + `KeepAlive`. An existing plist is preserved as
   `sh.ntfy.subscribe.plist.bak.YYYYMMDDHHMMSS`.
-- Loads the agent via `launchctl bootout` → `bootstrap` → `kickstart -k`.
+- Loads the agent via `launchctl bootout` → `bootstrap`.
 - Publishes a self-test message (`"nudge receiver installed"`) so you can
   confirm delivery.
 
@@ -181,7 +183,7 @@ into the tool's own config (or use the auto-wire flags above).
 
 | Tool        | Config file                  | Mechanism                          | "Done" event          | "Waiting" event       |
 | ----------- | ---------------------------- | ---------------------------------- | --------------------- | --------------------- |
-| Claude Code | `~/.claude/settings.json`    | hooks                              | `Stop`                | `Notification`        |
+| Claude Code | `~/.claude/settings.json`    | hooks                              | `Stop`                | (no waiting event)    |
 | Codex CLI   | `~/.codex/config.toml`       | `notify` + `[tui] notifications`   | `agent-turn-complete` | (no waiting event)    |
 | Gemini CLI  | `~/.gemini/settings.json`    | hooks                              | `AfterAgent`          | `Notification`        |
 
@@ -195,10 +197,12 @@ The auto-wire installers already write absolute paths.
 
 - ntfy.sh topics are **public**: anyone who knows the topic name can read or
   send to it. Use a long, random topic name (the `.env.example` explains this).
-- Notifications carry the user's last question / AI title in line 3. If those
-  may contain secrets, configure the wrappers to skip line 3 (e.g. by clearing
-  `$QUESTION` in your own fork), or self-host ntfy behind a private network
-  such as Tailscale.
+- Notifications carry the user's last question on the `Q:` line **and** the
+  assistant's most recent answer on the `A:` line. Either may contain
+  secrets. If that is a concern, configure the wrappers to skip both lines
+  (e.g. by clearing `$QUESTION` and `$ANSWER` in your own fork of
+  `notify-claude.sh` / `notify-codex.sh`), or self-host ntfy behind a
+  private network such as Tailscale.
 - For full privacy, self-host ntfy and set `NTFY_SERVER` to your own instance.
 
 ## ⚠️ Caveats and uncertainty
