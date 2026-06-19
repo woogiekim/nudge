@@ -69,8 +69,9 @@ WIRE_CLAUDE=0
 WIRE_CODEX=0
 WIRE_GEMINI=0
 SETUP_RECEIVER_MACOS=0
-for arg in "$@"; do
-  case "${arg}" in
+OPT_TOPIC=""
+while [[ $# -gt 0 ]]; do
+  case "${1}" in
     --wire-claude) WIRE_CLAUDE=1 ;;
     --wire-codex)  WIRE_CODEX=1 ;;
     --wire-gemini) WIRE_GEMINI=1 ;;
@@ -80,10 +81,25 @@ for arg in "$@"; do
       WIRE_GEMINI=1
       ;;
     --setup-receiver-macos) SETUP_RECEIVER_MACOS=1 ;;
+    --topic)
+      # --topic <value>: consume the next argv as the topic. Missing value
+      # (end of argv, or next token starts with --) leaves OPT_TOPIC empty
+      # and the resolver falls through to the next priority.
+      if [[ $# -ge 2 && "${2}" != --* ]]; then
+        OPT_TOPIC="${2}"
+        shift
+      else
+        OPT_TOPIC=""
+      fi
+      ;;
+    --topic=*)
+      # --topic=<value>: split on the first '='. An empty value falls through.
+      OPT_TOPIC="${1#--topic=}"
+      ;;
     -h|--help)
       cat <<USAGE
 Usage: install.sh [--wire-claude] [--wire-codex] [--wire-gemini] [--wire-all]
-                  [--setup-receiver-macos]
+                  [--setup-receiver-macos] [--topic <value>]
 
   --wire-claude              Merge nudge hooks into \${HOME}/.claude/settings.json (requires jq).
   --wire-codex               Set 'notify' in \${HOME}/.codex/config.toml (refuses to overwrite
@@ -95,6 +111,10 @@ Usage: install.sh [--wire-claude] [--wire-codex] [--wire-gemini] [--wire-all]
                              (brew installs ntfy + terminal-notifier, writes a
                              launchd subscriber plist, publishes a self-test).
                              Requires NTFY_TOPIC set in ~/.nudge/.env.
+  --topic <value>            Set NTFY_TOPIC during install (highest priority).
+                             Without it, the script falls back to: NTFY_TOPIC env
+                             var, existing ~/.nudge/.env, /dev/tty prompt (when
+                             interactive), and finally a loud warning.
 
 Default invocation only copies the nudge files; AI tool configs are left
 untouched.
@@ -102,11 +122,12 @@ USAGE
       exit 0
       ;;
     *)
-      echo "install.sh: unknown flag: ${arg}" >&2
-      echo "Usage: install.sh [--wire-claude] [--wire-codex] [--wire-gemini] [--wire-all] [--setup-receiver-macos]" >&2
+      echo "install.sh: unknown flag: ${1}" >&2
+      echo "Usage: install.sh [--wire-claude] [--wire-codex] [--wire-gemini] [--wire-all] [--setup-receiver-macos] [--topic <value>]" >&2
       exit 2
       ;;
   esac
+  shift
 done
 
 # --- Claude Code hook wiring (P1 + P2 wrapper rename) -----------------------
@@ -773,10 +794,191 @@ for src in "${NUDGE_CORE_SCRIPTS[@]}"; do
   fi
 done
 
-# Create .env only if it does not already exist (never overwrite your config)
+# --- NTFY_TOPIC resolution (5-tier, first match wins) ----------------------
+# Resolves the topic value to write into a freshly created ~/.nudge/.env, in
+# priority order:
+#   1. --topic <value>            (OPT_TOPIC, trimmed; empty falls through)
+#   2. NTFY_TOPIC env var         (trimmed; empty falls through)
+#   3. existing ~/.nudge/.env with a non-empty NTFY_TOPIC=...  → SHORT-CIRCUIT
+#      (never overwrite a user-edited .env; preserves the "left untouched"
+#       contract below)
+#   4. /dev/tty interactive prompt, guarded by `exec 3</dev/tty 2>/dev/null`.
+#      MUST NOT read from stdin — the curl|bash self-fetch path delivers the
+#      script body on stdin and a plain `read` would consume EOF.
+#   5. fallback: leave .env's NTFY_TOPIC empty; the existing ff361c5 LOUD
+#      WARNING (in setup_receiver_macos + Next-steps tail) fires later if the
+#      user also passed --setup-receiver-macos.
+#
+# Sets two script-scope variables:
+#   RESOLVED_TOPIC — trimmed topic string (empty in fallback/existing-env paths)
+#   TOPIC_SOURCE   — one of: flag | env | existing-env | tty | fallback
+RESOLVED_TOPIC=""
+TOPIC_SOURCE=""
+
+nudge_trim() {
+  # Strips leading/trailing whitespace AND control characters from $1; echoes
+  # the result. Pure-bash implementation so a stripped install-time PATH
+  # (e.g. /bin:/sbin:/usr/sbin during test fixtures that exclude /usr/bin
+  # to hide jq) cannot break the resolver. Control-char stripping protects
+  # the /dev/tty path against BSD `script(1)` pseudoterminals that may
+  # prepend an EOT (0x04) byte to the buffered input when their source pipe
+  # closes (see notes in `nudge_resolve_topic`).
+  local s="${1:-}"
+  local out="" c
+  local i=0
+  while [[ ${i} -lt ${#s} ]]; do
+    c="${s:${i}:1}"
+    case "${c}" in
+      [[:cntrl:]]) : ;;
+      *) out="${out}${c}" ;;
+    esac
+    i=$((i + 1))
+  done
+  # Trim leading/trailing whitespace using pure parameter expansion.
+  out="${out#"${out%%[![:space:]]*}"}"
+  out="${out%"${out##*[![:space:]]}"}"
+  printf '%s' "${out}"
+}
+
+nudge_env_topic_value() {
+  # Echoes the current NTFY_TOPIC value stored in $1 (an env file path),
+  # stripping wrapping single/double quotes. Empty echo when absent/empty.
+  local env_file="$1"
+  [[ -f "${env_file}" ]] || return 0
+  grep -E '^[[:space:]]*NTFY_TOPIC[[:space:]]*=' "${env_file}" \
+    | tail -n 1 \
+    | sed -E 's/^[[:space:]]*NTFY_TOPIC[[:space:]]*=[[:space:]]*//' \
+    | sed -E 's/^"(.*)"$/\1/' \
+    | sed -E "s/^'(.*)'\$/\\1/" \
+    || true
+}
+
+nudge_resolve_topic() {
+  local env_file="${INSTALL_DIR}/.env"
+  local val
+
+  # 1. --topic flag.
+  val="$(nudge_trim "${OPT_TOPIC:-}")"
+  if [[ -n "${val}" ]]; then
+    RESOLVED_TOPIC="${val}"
+    TOPIC_SOURCE="flag"
+    return 0
+  fi
+
+  # 2. NTFY_TOPIC env var.
+  val="$(nudge_trim "${NTFY_TOPIC:-}")"
+  if [[ -n "${val}" ]]; then
+    RESOLVED_TOPIC="${val}"
+    TOPIC_SOURCE="env"
+    return 0
+  fi
+
+  # 3. Existing ~/.nudge/.env with a non-empty NTFY_TOPIC=... → short-circuit.
+  if [[ -f "${env_file}" ]]; then
+    val="$(nudge_env_topic_value "${env_file}")"
+    if [[ -n "${val}" ]]; then
+      RESOLVED_TOPIC=""
+      TOPIC_SOURCE="existing-env"
+      return 0
+    fi
+  fi
+
+  # 4. Guarded /dev/tty prompt. Open ONLY a separate fd 3 — never stdin.
+  #    Self-fetch curl|bash puts the script body on stdin, so a plain `read`
+  #    would consume EOF and the script would silently fall through here.
+  #
+  #    Important: write the human-facing prompt to stderr (which IS the
+  #    controlling tty when interactive), NOT to fd 3. Some pty layers (BSD
+  #    `script` on macOS, certain CI tty multiplexers) loop slave writes back
+  #    into the slave read buffer, which would otherwise let `read -r <&3`
+  #    consume the prompt text itself as the topic. Reading fd 3 only keeps
+  #    the input channel free of our own output.
+  #
+  #    `stty eof undef <&3`: when install.sh is driven through a fresh BSD
+  #    `script(1)` pty whose stdin source (e.g. a printf pipe in the test
+  #    harness) closes before the read happens, the pty injects an EOF char
+  #    that races ahead of the buffered topic line and makes `read` return
+  #    immediately empty. Undefining the EOF char keeps the line-discipline
+  #    cooked-mode editing (backspace, Ctrl-W) intact for real users while
+  #    letting `read` see the buffered topic line in the pty-race case.
+  #    Errors are swallowed because stty is best-effort across BSD/GNU.
+  if exec 3</dev/tty 2>/dev/null; then
+    local typed=""
+    stty eof undef <&3 2>/dev/null || true
+    printf '%s' '>>> Enter NTFY_TOPIC (leave blank to skip): ' >&2 || true
+    read -r typed <&3 || typed=''
+    stty eof '^D' <&3 2>/dev/null || true
+    exec 3<&-
+    typed="$(nudge_trim "${typed}")"
+    if [[ -n "${typed}" ]]; then
+      RESOLVED_TOPIC="${typed}"
+      TOPIC_SOURCE="tty"
+      return 0
+    fi
+  fi
+
+  # 5. Fallback — empty topic; the LOUD WARNING from ff361c5 (in
+  # setup_receiver_macos + Next-steps tail) is unchanged and fires later.
+  RESOLVED_TOPIC=""
+  TOPIC_SOURCE="fallback"
+}
+
+nudge_write_topic_to_env() {
+  # Replaces the first NTFY_TOPIC= line in $1 with NTFY_TOPIC=$2 (unquoted).
+  # Unquoted form matches the canonical shape consumed by both the
+  # `setup_receiver_macos` topic extractor and downstream `grep -E
+  # '^NTFY_TOPIC=value$'` assertions; topics in nudge's threat model are long
+  # random alphanumeric/dash strings, so quoting is not load-bearing.
+  # Preserves file mode (mktemp creates 600 by default, which would otherwise
+  # tighten .env's mode below .env.example's).
+  local env_file="$1"
+  local topic="$2"
+  local mode tmp
+
+  mode="$(stat -f '%Lp' "${env_file}" 2>/dev/null || stat -c '%a' "${env_file}" 2>/dev/null || echo '')"
+  tmp="$(mktemp "${env_file}.tmp.XXXXXX")"
+
+  awk -v topic="${topic}" '
+    BEGIN { done = 0 }
+    /^[[:space:]]*NTFY_TOPIC[[:space:]]*=/ {
+      if (!done) {
+        print "NTFY_TOPIC=" topic
+        done = 1
+        next
+      }
+    }
+    { print }
+  ' "${env_file}" > "${tmp}"
+
+  mv "${tmp}" "${env_file}"
+  if [[ -n "${mode}" ]]; then
+    chmod "${mode}" "${env_file}" 2>/dev/null || true
+  fi
+}
+
+nudge_resolve_topic
+
+# Create .env only if it does not already exist (never overwrite your config).
+# When the resolver yielded a topic from --topic / env / tty AND .env did not
+# previously exist, persist it into the new file. The existing-env path is
+# handled by the `else` branch below (file untouched, contract preserved).
 if [[ ! -f "${INSTALL_DIR}/.env" ]]; then
   cp "${STAGE_DIR}/.env.example" "${INSTALL_DIR}/.env"
-  echo "==> Created ${INSTALL_DIR}/.env  (edit it and set NTFY_TOPIC)"
+  if [[ -n "${RESOLVED_TOPIC}" ]]; then
+    nudge_write_topic_to_env "${INSTALL_DIR}/.env" "${RESOLVED_TOPIC}"
+    echo "==> Created ${INSTALL_DIR}/.env  (NTFY_TOPIC set from ${TOPIC_SOURCE})"
+  else
+    echo "==> Created ${INSTALL_DIR}/.env  (edit it and set NTFY_TOPIC)"
+    # Install-time LOUD WARNING when fallback was the only available source.
+    # Mirrors the ff361c5 receiver-skipped warning style: a single stderr
+    # WARNING line that names the file and the next manual step. The
+    # receiver-skipped warning in setup_receiver_macos() (install.sh ~line
+    # 555) stays unmodified — this is a separate, install-time signal that
+    # fires regardless of --setup-receiver-macos.
+    if [[ "${TOPIC_SOURCE}" == "fallback" ]]; then
+      echo "WARNING: NTFY_TOPIC is empty in ${INSTALL_DIR}/.env. Edit ${INSTALL_DIR}/.env and set NTFY_TOPIC, or re-run install.sh with --topic <value>." >&2
+    fi
+  fi
 else
   echo "==> ${INSTALL_DIR}/.env already exists — left untouched"
 fi
@@ -796,10 +998,24 @@ if [[ "${SETUP_RECEIVER_MACOS}" -eq 1 ]]; then
   setup_receiver_macos
 fi
 
+# Next-steps step 1 wording adapts to the resolver outcome. When the install
+# wrote a topic during this run (flag | env | tty), step 1 becomes a "✓"
+# acknowledgement; otherwise it keeps the original "Edit ... and set
+# NTFY_TOPIC" instruction so the loud-warning + fallback paths still nudge
+# the user toward editing .env by hand.
+case "${TOPIC_SOURCE}" in
+  flag|env|tty)
+    NUDGE_NEXT_STEP_1="✓ NTFY_TOPIC already set in ${INSTALL_DIR}/.env (from ${TOPIC_SOURCE})"
+    ;;
+  *)
+    NUDGE_NEXT_STEP_1="Edit ${INSTALL_DIR}/.env and set a unique NTFY_TOPIC"
+    ;;
+esac
+
 cat <<EOF
 
 Next steps:
-  1. Edit ${INSTALL_DIR}/.env and set a unique NTFY_TOPIC
+  1. ${NUDGE_NEXT_STEP_1}
   2. Subscribe to that same topic in the ntfy app (iOS / Android / desktop / web)
   3. Test it:
        ${INSTALL_DIR}/notify.sh 'Test' 'It works' high

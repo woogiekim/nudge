@@ -86,20 +86,28 @@ the auto-wire flags below.
 If you'd rather not `git clone` first, pipe `install.sh` straight from GitHub:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/woogiekim/nudge/main/install.sh | bash -s -- --wire-all
+curl -fsSL https://raw.githubusercontent.com/woogiekim/nudge/main/install.sh \
+  | bash -s -- --wire-all --topic <your-topic>
 ```
 
 macOS variant (also provisions the headless ntfy receiver):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/woogiekim/nudge/main/install.sh | bash -s -- --wire-all --setup-receiver-macos
+curl -fsSL https://raw.githubusercontent.com/woogiekim/nudge/main/install.sh \
+  | bash -s -- --wire-all --setup-receiver-macos --topic <your-topic>
 ```
+
+Without `--topic`, `install.sh` falls back through `NTFY_TOPIC` env var → an
+existing `~/.nudge/.env` → an interactive `/dev/tty` prompt → a loud warning
+(non-interactive runs continue with exit 0 so curl|bash chaining stays green).
 
 The script auto-detects that no checkout sits next to it and self-fetches the
 seven nudge scripts plus `.env.example` from the same raw base URL into
 `~/.nudge/`. After install you still need to:
 
-1. Set `NTFY_TOPIC` to a long random string in `~/.nudge/.env`.
+1. Set `NTFY_TOPIC` to a long random string in `~/.nudge/.env` (unless you
+   already passed `--topic`, set `NTFY_TOPIC=...` in the calling shell, or
+   typed a value at the interactive prompt).
 2. Subscribe to that same topic in the ntfy app (iOS / Android / desktop / web).
 
 The existing `git clone` + `bash install.sh` flow remains fully supported and
@@ -109,7 +117,8 @@ raw base URL:
 
 ```bash
 NUDGE_RAW_BASE_URL=https://raw.githubusercontent.com/<fork>/nudge/<ref> \
-  curl -fsSL "${NUDGE_RAW_BASE_URL}/install.sh" | bash -s -- --wire-all
+  curl -fsSL "${NUDGE_RAW_BASE_URL}/install.sh" \
+    | bash -s -- --wire-all --topic <your-topic>
 ```
 
 ### Opt-in auto-wiring
