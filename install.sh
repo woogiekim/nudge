@@ -999,13 +999,16 @@ if [[ "${SETUP_RECEIVER_MACOS}" -eq 1 ]]; then
 fi
 
 # Next-steps step 1 wording adapts to the resolver outcome. When the install
-# wrote a topic during this run (flag | env | tty), step 1 becomes a "✓"
-# acknowledgement; otherwise it keeps the original "Edit ... and set
-# NTFY_TOPIC" instruction so the loud-warning + fallback paths still nudge
-# the user toward editing .env by hand.
+# wrote a topic during this run (flag | env | tty) OR found an existing topic
+# (existing-env), step 1 becomes a "✓" acknowledgement; otherwise it keeps
+# the original "Edit ... and set NTFY_TOPIC" instruction so the loud-warning
+# + fallback paths still nudge the user toward editing .env by hand.
 case "${TOPIC_SOURCE}" in
   flag|env|tty)
     NUDGE_NEXT_STEP_1="✓ NTFY_TOPIC already set in ${INSTALL_DIR}/.env (from ${TOPIC_SOURCE})"
+    ;;
+  existing-env)
+    NUDGE_NEXT_STEP_1="✓ NTFY_TOPIC already set in ${INSTALL_DIR}/.env (existing config)"
     ;;
   *)
     NUDGE_NEXT_STEP_1="Edit ${INSTALL_DIR}/.env and set a unique NTFY_TOPIC"
