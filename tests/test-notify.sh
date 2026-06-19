@@ -189,8 +189,87 @@ scenario_t2_cache_no_header() {
     "T2/T3 curl argv has exactly 4 '-H' flags"
 }
 
+# ---------------------------------------------------------------------------
+# Scenario F3 — empty NTFY_TOPIC writes a trace line to ~/.nudge/notify.log
+#
+# Spec: prd.md § F3 — notify.sh trace-log on skip
+#   Given NTFY_TOPIC is unset in env and absent from .env
+#   When notify.sh "TestTitle" "TestMsg" runs (HOME redirected to a fixture)
+#   Then the script exits 0
+#   And ${HOME}/.nudge/notify.log exists and contains a line with a
+#       timestamp-looking token AND the literal "NTFY_TOPIC" AND the title.
+#   And the existing stderr message "not set ... Skipping" is still emitted.
+#
+# Expected to FAIL on the unmodified notify.sh (red phase) — the script
+# currently writes only to stderr and exits 0 without touching notify.log.
+# ---------------------------------------------------------------------------
+scenario_f3_empty_topic_writes_trace_log() {
+  echo "=== Scenario F3: empty NTFY_TOPIC writes trace line to ~/.nudge/notify.log ==="
+  SCENARIOS_RUN=$((SCENARIOS_RUN+1))
+
+  local home_dir
+  home_dir="$(make_fixture_home)"
+  # No .env file beside the script's SCRIPT_DIR is created in the fixture
+  # HOME, and we explicitly unset NTFY_TOPIC in the env. notify.sh resolves
+  # SCRIPT_DIR to the real repo dir (the notify.sh path), so if a stale .env
+  # exists beside the repo's notify.sh it could leak through. Defensive:
+  # explicitly empty NTFY_TOPIC and NTFY_SERVER on the command line so the
+  # in-script env-takes-precedence logic forces topic=empty.
+
+  local stderr_file="${home_dir}/stderr.txt"
+
+  set +e
+  HOME="${home_dir}" \
+    NTFY_TOPIC="" \
+    NTFY_SERVER="" \
+    bash "${NOTIFY_SH}" "TestTitle" "TestMsg" >/dev/null 2>"${stderr_file}"
+  local rc=$?
+  set -e
+
+  if [[ "${rc}" -ne 0 ]]; then
+    fail "F3 notify.sh exited ${rc}, expected 0 (must remain hook-safe)"
+  else
+    pass "F3 notify.sh exited 0"
+  fi
+
+  # The existing stderr behaviour must NOT regress — the "not set ... Skipping"
+  # message is the long-standing operator signal and must still be there.
+  if grep -F -- "not set" "${stderr_file}" >/dev/null 2>&1 \
+      && grep -F -- "Skipping" "${stderr_file}" >/dev/null 2>&1; then
+    pass "F3 stderr still contains the legacy 'not set' + 'Skipping' message"
+  else
+    fail "F3 stderr regressed — missing 'not set' or 'Skipping'"
+    echo "    --- stderr ---" >&2
+    cat "${stderr_file}" >&2
+    echo "    --------------" >&2
+  fi
+
+  local log_file="${home_dir}/.nudge/notify.log"
+  if [[ -f "${log_file}" ]]; then
+    pass "F3 ${HOME}/.nudge/notify.log exists after skip"
+  else
+    fail "F3 ${log_file} does NOT exist — trace log was not written"
+    return
+  fi
+
+  # The trace line must include: a timestamp-looking token (4-digit year
+  # followed by '-'), the literal token 'NTFY_TOPIC', and the title.
+  # All three on the same line — that's the operator grep contract.
+  if grep -E '20[0-9]{2}-' "${log_file}" \
+      | grep -F 'NTFY_TOPIC' \
+      | grep -F 'TestTitle' >/dev/null 2>&1; then
+    pass "F3 notify.log line contains timestamp + NTFY_TOPIC + 'TestTitle'"
+  else
+    fail "F3 notify.log line missing one of: timestamp, NTFY_TOPIC, 'TestTitle'"
+    echo "    --- notify.log ---" >&2
+    cat "${log_file}" >&2
+    echo "    ------------------" >&2
+  fi
+}
+
 main() {
   scenario_t2_cache_no_header
+  scenario_f3_empty_topic_writes_trace_log
 
   echo
   echo "Scenarios run: ${SCENARIOS_RUN}"
