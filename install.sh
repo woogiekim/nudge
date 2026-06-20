@@ -244,7 +244,7 @@ wire_codex_settings() {
   # process tree right after the turn (esp. `codex exec`), killing a still-running
   # synchronous curl. We wrap the wrapper in a backgrounded subshell + nohup so
   # the network call survives teardown. No setsid — macOS doesn't ship it.
-  local notify_line='notify = ["bash", "-c", "( nohup '"${wrapper_path}"' \"$1\" >/dev/null 2>&1 & )", "--"]'
+  local notify_line='notify = ["bash", "-c", '"'"'( nohup '"${wrapper_path}"' "$1" >/dev/null 2>&1 & )'"'"', "--"]'
 
   # Always print a portable manual command line that the user can paste.
   local manual_snippet="${notify_line}"
