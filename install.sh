@@ -548,6 +548,9 @@ wire_gemini_settings() {
 #   NUDGE_LAUNCHCTL_CMD     default "launchctl"
 #   NUDGE_OPEN_CMD          default "open"
 #   NUDGE_TN_CMD            default "terminal-notifier"
+#   NUDGE_TN_APP_PATH       default auto-detect terminal-notifier.app
+#   NUDGE_LSREGISTER_CMD    default macOS lsregister path
+#   NUDGE_KILLALL_CMD       default "killall"
 #   NUDGE_NTFY_CMD          default "ntfy"
 #   NUDGE_PUBLISH_CMD       default "${NUDGE_NTFY_CMD} publish"
 #   NUDGE_LAUNCHAGENTS_DIR  default "${HOME}/Library/LaunchAgents"
@@ -729,10 +732,44 @@ PLIST_EOF
     >&2 echo "==> WARN: launchd bootstrap of sh.ntfy.subscribe failed after ${bootstrap_attempt} attempts; run 'launchctl bootstrap gui/${uid} ${plist}' manually"
   fi
 
-  # 7. Permission guidance.
+  # 7. Register/refresh terminal-notifier before the first permission seed.
+  # Fresh installs can have the app available on disk before Notification
+  # Center has a stable LaunchServices/UserNotifications view of it.
   local tn_cmd="${NUDGE_TN_CMD:-terminal-notifier}"
+  local tn_app="${NUDGE_TN_APP_PATH:-}"
+  if [[ -z "${tn_app}" ]]; then
+    local tn_bin=""
+    tn_bin="$(command -v "${tn_cmd}" 2>/dev/null || true)"
+    if [[ -n "${tn_bin}" ]]; then
+      local tn_real="${tn_bin}"
+      if command -v realpath >/dev/null 2>&1; then
+        tn_real="$(realpath "${tn_bin}" 2>/dev/null || printf '%s' "${tn_bin}")"
+      fi
+      tn_app="$(cd "$(dirname "${tn_real}")/.." 2>/dev/null && pwd -P)/terminal-notifier.app"
+    fi
+    if [[ ! -d "${tn_app}" && -d "/opt/homebrew/opt/terminal-notifier/terminal-notifier.app" ]]; then
+      tn_app="/opt/homebrew/opt/terminal-notifier/terminal-notifier.app"
+    fi
+    if [[ ! -d "${tn_app}" && -d "/usr/local/opt/terminal-notifier/terminal-notifier.app" ]]; then
+      tn_app="/usr/local/opt/terminal-notifier/terminal-notifier.app"
+    fi
+  fi
+
+  local lsregister_cmd="${NUDGE_LSREGISTER_CMD:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}"
+  if [[ -d "${tn_app}" ]] && { [[ -x "${lsregister_cmd}" ]] || command -v "${lsregister_cmd}" >/dev/null 2>&1; }; then
+    "${lsregister_cmd}" -f "${tn_app}" >/dev/null 2>&1 || true
+  fi
+
+  local killall_cmd="${NUDGE_KILLALL_CMD:-killall}"
+  if command -v "${killall_cmd}" >/dev/null 2>&1; then
+    "${killall_cmd}" NotificationCenter >/dev/null 2>&1 || true
+    "${killall_cmd}" usernoted >/dev/null 2>&1 || true
+    sleep 1
+  fi
+
+  # 8. Permission guidance.
   local open_cmd="${NUDGE_OPEN_CMD:-open}"
-  "${tn_cmd}" -title nudge -message "nudge receiver setup — grant notification permission" >/dev/null 2>&1 || true
+  "${tn_cmd}" -title nudge -message "nudge receiver setup — grant notification permission" -sound default -ignoreDnD >/dev/null 2>&1 || true
   "${open_cmd}" "x-apple.systempreferences:com.apple.Notifications-Settings.extension" >/dev/null 2>&1 || true
 
   cat <<PERM_EOF
@@ -742,7 +779,7 @@ PLIST_EOF
     The Notifications pane was opened for you (best-effort).
 PERM_EOF
 
-  # 8. Self-test publish + duplicate-GUI advisory.
+  # 9. Self-test publish + duplicate-GUI advisory.
   local publish_cmd="${NUDGE_PUBLISH_CMD:-${ntfy_cmd} publish}"
   echo "==> Publishing self-test message to topic '${topic}'"
   # shellcheck disable=SC2086

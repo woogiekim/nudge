@@ -81,7 +81,7 @@ exit 0
 UNAME_EOF
 
   # generic recorder factory
-  for cmd in brew ntfy launchctl open terminal-notifier; do
+  for cmd in brew ntfy launchctl open terminal-notifier lsregister killall; do
     cat > "${stub_dir}/${cmd}" <<RECORDER_EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$@" >> "${shim_log}/${cmd}.calls"
@@ -184,7 +184,7 @@ scenario_a_non_darwin_guard() {
     "(a) no plist written"
 
   # Side-effect counters must all be 0 (uname is allowed to be called).
-  for cmd in brew launchctl open terminal-notifier; do
+  for cmd in brew launchctl open terminal-notifier lsregister killall; do
     local calls_file="${home_dir}/_shims/${cmd}.calls"
     if [[ -f "${calls_file}" ]] && [[ -s "${calls_file}" ]]; then
       fail "(a) ${cmd} stub was invoked unexpectedly:"
@@ -324,6 +324,8 @@ scenario_c_happy_path() {
   printf 'NTFY_TOPIC="fixture-topic-abc"\n' > "${home_dir}/.nudge/.env"
 
   local lad="${home_dir}/Library/LaunchAgents"
+  local tn_app="${home_dir}/Applications/terminal-notifier.app"
+  mkdir -p "${tn_app}"
 
   local output
   set +e
@@ -335,6 +337,9 @@ scenario_c_happy_path() {
     NUDGE_LAUNCHCTL_CMD="${stub_dir}/launchctl" \
     NUDGE_OPEN_CMD="${stub_dir}/open" \
     NUDGE_TN_CMD="${stub_dir}/terminal-notifier" \
+    NUDGE_TN_APP_PATH="${tn_app}" \
+    NUDGE_LSREGISTER_CMD="${stub_dir}/lsregister" \
+    NUDGE_KILLALL_CMD="${stub_dir}/killall" \
     bash "${INSTALL_SH}" --setup-receiver-macos 2>&1)"
   local rc=$?
   set -e
@@ -382,6 +387,31 @@ scenario_c_happy_path() {
     pass "(c) launchctl received bootstrap subcommand"
   else
     fail "(c) launchctl bootstrap subcommand not captured"
+  fi
+
+  if grep -F -- "-f" "${home_dir}/_shims/lsregister.calls" >/dev/null 2>&1 \
+      && grep -F -- "${tn_app}" "${home_dir}/_shims/lsregister.calls" >/dev/null 2>&1; then
+    pass "(c) terminal-notifier app registered with LaunchServices"
+  else
+    fail "(c) terminal-notifier app was not registered with LaunchServices"
+    cat "${home_dir}/_shims/lsregister.calls" >&2 2>/dev/null || true
+  fi
+
+  if grep -F -x -- "NotificationCenter" "${home_dir}/_shims/killall.calls" >/dev/null 2>&1 \
+      && grep -F -x -- "usernoted" "${home_dir}/_shims/killall.calls" >/dev/null 2>&1; then
+    pass "(c) NotificationCenter/usernoted refresh requested"
+  else
+    fail "(c) NotificationCenter/usernoted refresh not requested"
+    cat "${home_dir}/_shims/killall.calls" >&2 2>/dev/null || true
+  fi
+
+  if grep -F -x -- "-ignoreDnD" "${home_dir}/_shims/terminal-notifier.calls" >/dev/null 2>&1 \
+      && grep -F -x -- "-sound" "${home_dir}/_shims/terminal-notifier.calls" >/dev/null 2>&1 \
+      && grep -F -x -- "default" "${home_dir}/_shims/terminal-notifier.calls" >/dev/null 2>&1; then
+    pass "(c) permission seed notification requests visible delivery"
+  else
+    fail "(c) permission seed notification missing -ignoreDnD/-sound default"
+    cat "${home_dir}/_shims/terminal-notifier.calls" >&2 2>/dev/null || true
   fi
 }
 

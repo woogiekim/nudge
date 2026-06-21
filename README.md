@@ -188,6 +188,11 @@ This flag is **macOS only**; on Linux/Windows it is a clean no-op. It:
   `RunAtLoad` + `KeepAlive`. An existing plist is preserved as
   `sh.ntfy.subscribe.plist.bak.YYYYMMDDHHMMSS`.
 - Loads the agent via `launchctl bootout` → `bootstrap`.
+- Registers `terminal-notifier.app` with LaunchServices and refreshes
+  Notification Center/usernoted best-effort so a fresh install sees the new
+  notifier immediately.
+- Sends a permission-seed notification with sound and Do Not Disturb bypass
+  flags before opening System Settings.
 - Publishes a self-test message (`"nudge receiver installed"`) so you can
   confirm delivery.
 

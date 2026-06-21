@@ -121,7 +121,7 @@ scenario_a_tn_happy_path() {
     return
   fi
 
-  for needle in '-title' 'ARG=Test T' '-message' 'ARG=Test M' '-sound' 'ARG=default'; do
+  for needle in '-title' 'ARG=Test T' '-message' 'ARG=Test M' '-sound' 'ARG=default' '-ignoreDnD'; do
     if grep -F -- "${needle}" "${tn_calls}" >/dev/null 2>&1; then
       pass "(a) terminal-notifier received '${needle}'"
     else
@@ -531,6 +531,12 @@ scenario_g_two_lf_subtitle_route() {
     pass "(g) -message value is the TAIL/A line '💡 A!'"
   else
     fail "(g) -message value not the TAIL/A line"
+  fi
+
+  if grep -F -- '-ignoreDnD' "${tn_calls}" >/dev/null 2>&1; then
+    pass "(g) -ignoreDnD flag present for subtitle notifications"
+  else
+    fail "(g) -ignoreDnD flag missing for subtitle notifications"
   fi
 
   # HEAD ("Response complete · main") MUST NOT appear in any tn arg — it is

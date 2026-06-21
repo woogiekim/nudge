@@ -87,7 +87,7 @@ SUBTITLE_SAFE="${SUBTITLE//\"/}"
 # (bytewise backward compat for single-line bodies).
 if [[ -n "${SUBTITLE_SAFE}" ]]; then
   if command -v "${TN_CMD}" >/dev/null 2>&1; then
-    "${TN_CMD}" -title "${TITLE_SAFE}" -subtitle "${SUBTITLE_SAFE}" -message "${MSG_SAFE}" -sound default >/dev/null 2>&1 \
+    "${TN_CMD}" -title "${TITLE_SAFE}" -subtitle "${SUBTITLE_SAFE}" -message "${MSG_SAFE}" -sound default -ignoreDnD >/dev/null 2>&1 \
       || "${OSA_CMD}" -e "display notification \"${MSG_SAFE}\" with title \"${TITLE_SAFE}\" subtitle \"${SUBTITLE_SAFE}\"" >/dev/null 2>&1 \
       || true
   else
@@ -95,7 +95,7 @@ if [[ -n "${SUBTITLE_SAFE}" ]]; then
   fi
 else
   if command -v "${TN_CMD}" >/dev/null 2>&1; then
-    "${TN_CMD}" -title "${TITLE_SAFE}" -message "${MSG_SAFE}" -sound default >/dev/null 2>&1 \
+    "${TN_CMD}" -title "${TITLE_SAFE}" -message "${MSG_SAFE}" -sound default -ignoreDnD >/dev/null 2>&1 \
       || "${OSA_CMD}" -e "display notification \"${MSG_SAFE}\" with title \"${TITLE_SAFE}\"" >/dev/null 2>&1 \
       || true
   else
