@@ -467,10 +467,59 @@ scenario_c_failed_download_aborts() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Scenario D — stdin-driven bash (`curl | bash -s`) with no BASH_SOURCE[0]
+# warning.
+# ---------------------------------------------------------------------------
+scenario_d_stdin_bash_source_safe() {
+  echo "=== Scenario D: stdin bash install has no BASH_SOURCE[0] warning ==="
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local root home_dir stub_dir calls_log counter_file
+  root="$(mkroot)"
+  home_dir="${root}/home"
+  stub_dir="${root}/_stubbin"
+  calls_log="${root}/fetch.calls"
+  counter_file="${root}/fetch.count"
+
+  mkdir -p "${home_dir}" "${stub_dir}"
+  make_fetch_stub "${stub_dir}/mock-fetch" "${calls_log}" "${counter_file}"
+
+  set +e
+  HOME="${home_dir}" \
+    NUDGE_FETCH_CMD="${stub_dir}/mock-fetch" \
+    NUDGE_RAW_BASE_URL="https://example.invalid/base" \
+    bash -s < "${INSTALL_SH}" >"${root}/stdout.log" 2>"${root}/stderr.log"
+  local rc=$?
+  set -e
+
+  if [[ "${rc}" -eq 0 ]]; then
+    pass "D stdin-driven install exited 0"
+  else
+    fail "D stdin-driven install exited ${rc}; expected 0"
+  fi
+
+  if grep -F -- 'BASH_SOURCE[0]: unbound variable' "${root}/stderr.log" >/dev/null 2>&1; then
+    fail "D stderr contains BASH_SOURCE[0] unbound variable warning"
+    sed 's/^/    /' "${root}/stderr.log" >&2 || true
+  else
+    pass "D stderr has no BASH_SOURCE[0] unbound variable warning"
+  fi
+
+  local invocations
+  invocations="$(counter_value "${counter_file}")"
+  if [[ "${invocations}" -eq 9 ]]; then
+    pass "D self-fetch still fetched 9 files"
+  else
+    fail "D fetched ${invocations} file(s); expected 9"
+  fi
+}
+
 main() {
   scenario_a_siblings_present_no_fetch
   scenario_b_siblings_absent_self_fetch
   scenario_c_failed_download_aborts
+  scenario_d_stdin_bash_source_safe
 
   echo
   echo "Scenarios run: ${SCENARIOS_RUN}"

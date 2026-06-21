@@ -336,7 +336,7 @@ scenario_f4_dev_tty_prompt() {
   printf 'interactive-topic\n' \
     | HOME="${home_dir}" NTFY_TOPIC="" \
       script -q "${typescript}" \
-        /bin/bash -c "exec '${src_dir}/install.sh' </dev/tty" \
+        /bin/bash -c "exec '${src_dir}/install.sh' </dev/tty 2>/dev/tty" \
         >"${root}/stdout.log" 2>"${root}/stderr.log" &
   local pid=$!
 
@@ -368,6 +368,14 @@ scenario_f4_dev_tty_prompt() {
   else
     fail "F4 install.sh exited ${rc} (expected 0). stderr:"
     sed 's/^/    /' "${root}/stderr.log" >&2 || true
+  fi
+
+  cat "${typescript}" "${root}/stdout.log" "${root}/stderr.log" > "${root}/prompt-combined.log"
+  if grep -F -- 'NTFY_TOPIC is required for macOS receiver setup' "${root}/prompt-combined.log" >/dev/null 2>&1; then
+    pass "F4 prompt explains why NTFY_TOPIC is being requested"
+  else
+    fail "F4 prompt did not explain why NTFY_TOPIC is being requested"
+    sed 's/^/    /' "${root}/prompt-combined.log" >&2 || true
   fi
 
   assert_env_topic "${home_dir}/.nudge/.env" "interactive-topic" "F4"

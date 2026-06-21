@@ -19,7 +19,12 @@
 set -euo pipefail
 
 INSTALL_DIR="${HOME}/.nudge"
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-${0:-}}"
+if [[ -n "${SCRIPT_SOURCE}" && -f "${SCRIPT_SOURCE}" ]]; then
+  SRC_DIR="$(cd "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
+else
+  SRC_DIR=""
+fi
 
 # Raw base URL for self-fetch (no-clone curl|bash install). Override to point
 # at a fork/branch: NUDGE_RAW_BASE_URL=https://raw.githubusercontent.com/<fork>/nudge/<ref>
@@ -924,8 +929,8 @@ nudge_resolve_topic() {
   #    Self-fetch curl|bash puts the script body on stdin, so a plain `read`
   #    would consume EOF and the script would silently fall through here.
   #
-  #    Important: write the human-facing prompt to stderr (which IS the
-  #    controlling tty when interactive), NOT to fd 3. Some pty layers (BSD
+  #    Important: write the human-facing prompt to stdout (the same stream as
+  #    installer progress output when interactive), NOT to fd 3. Some pty layers (BSD
   #    `script` on macOS, certain CI tty multiplexers) loop slave writes back
   #    into the slave read buffer, which would otherwise let `read -r <&3`
   #    consume the prompt text itself as the topic. Reading fd 3 only keeps
@@ -942,7 +947,9 @@ nudge_resolve_topic() {
   if exec 3</dev/tty 2>/dev/null; then
     local typed=""
     stty eof undef <&3 2>/dev/null || true
-    printf '%s' '>>> Enter NTFY_TOPIC (leave blank to skip): ' >&2 || true
+    echo "==> NTFY_TOPIC is required for macOS receiver setup." || true
+    echo "    Use a long, random topic. Leave blank to skip receiver provisioning." || true
+    printf '%s' '>>> Enter NTFY_TOPIC (leave blank to skip): ' || true
     read -r typed <&3 || typed=''
     stty eof '^D' <&3 2>/dev/null || true
     exec 3<&-
