@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.nudge/notify-claude-turn-start.sh"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",

@@ -18,7 +18,7 @@ parses the tool's hook payload (project dir, git branch, latest user prompt
 or AI title) and then hands a context-rich title + message to `notify.sh`.
 
 ```
-Claude Code (Stop hook) ─→ notify-claude.sh ┐
+Claude Code (UserPromptSubmit + Stop hooks) ─→ notify-claude*.sh ┐
 Codex CLI   (notify program, JSON argv) ─→ notify-codex.sh ├─→ notify.sh ─→ ntfy.sh/<topic> ─→ phone / desktop
 Gemini CLI  (AfterAgent / Notification) ─→ notify-gemini.sh┘
 ```
@@ -41,6 +41,7 @@ A: {assistant answer}            (omitted when empty)
 - `{gitBranch}` is omitted (no `· branch`) when the dir is not a git repo.
 - `Q: {question}` carries the user's last question (or extracted AI title). It is omitted when empty and truncated to the `NUDGE_MAX_Q` codepoint cap (default `80`).
 - `A: {assistant answer}` carries the assistant's most recent answer. It is omitted when empty and truncated to the `NUDGE_MAX_A` codepoint cap (default `120`).
+- Claude Code and Codex CLI suppress completion banners for fast turns when a matching start stamp shows `0 < elapsed < NUDGE_MIN_TURN_SEC` (default `180`). Set `NUDGE_MIN_TURN_SEC=0` to disable suppression.
 
 ## 📁 Project structure
 
@@ -49,6 +50,7 @@ nudge/
 ├── README.md                       # this file
 ├── notify.sh                       # shared ntfy sender (the core)
 ├── notify-claude.sh                # Claude Code context wrapper (stdin JSON)
+├── notify-claude-turn-start.sh     # Claude Code fast-turn start stamp hook
 ├── notify-codex.sh                 # Codex CLI context wrapper (ARGV[1] JSON)
 ├── notify-gemini.sh                # Gemini CLI context wrapper (stdin JSON)
 ├── _nudge_lib.sh                   # shared helpers (truncate / format)

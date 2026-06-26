@@ -65,6 +65,7 @@ mkroot() {
 SIBLING_SCRIPTS=(
   "notify.sh"
   "notify-claude.sh"
+  "notify-claude-turn-start.sh"
   "notify-codex.sh"
   "notify-codex-turn-start.sh"
   "notify-gemini.sh"

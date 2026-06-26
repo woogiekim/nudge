@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spec: prd.md § "Core Features / Must have" — acceptance criteria for
-# install.sh --wire-claude (Stop-only wiring).
+# install.sh --wire-claude (completion Stop hook + start stamp hook wiring).
 #
 # Five scenarios, derived from the PRD's Gherkin acceptance block:
-#   (a) Merge into absent settings.json → Stop-only (NOT Notification)
+#   (a) Merge into absent settings.json → Stop + UserPromptSubmit (NOT Notification)
 #   (b) Append preserves a pre-existing non-nudge Stop hook
 #   (c) Idempotent re-run (no duplicate, no new backup)
 #   (d) jq-absent path prints manual snippet and leaves fixture untouched
@@ -128,11 +128,11 @@ scenario_a_absent_file() {
     fail "settings.json missing absolute-form path ${expected_prefix}*.sh"
     return
   fi
-  if ! grep -E "/\.nudge/notify(-claude)?\.sh" "${fixture_file}" >/dev/null 2>&1; then
-    fail "settings.json missing /.nudge/notify.sh or /.nudge/notify-claude.sh path"
+  if ! grep -E "/\.nudge/notify(-claude(-turn-start)?)?\.sh" "${fixture_file}" >/dev/null 2>&1; then
+    fail "settings.json missing /.nudge/notify*.sh path"
     return
   fi
-  pass "settings.json contains absolute-form notify(.sh|-claude.sh) path"
+  pass "settings.json contains absolute-form notify*.sh path"
 
   if grep -F "~/.nudge/notify.sh" "${fixture_file}" >/dev/null 2>&1; then
     fail "settings.json contains forbidden tilde-form '~/.nudge/notify.sh'"
@@ -149,14 +149,27 @@ scenario_a_absent_file() {
     fi
     pass ".hooks.Stop references notify(-claude).sh"
 
-    # Stop-only contract: .hooks.Notification is either absent OR contains no
-    # entry whose command matches the nudge wrapper. The dual-hook regression
-    # would put the nudge wrapper under Notification — fail in that case.
+    local start_nudge_count
+    start_nudge_count="$(jq -r '
+      [ (.hooks.UserPromptSubmit // [])[]
+        | .hooks[]?
+        | select(.command | test("/\\.nudge/notify-claude-turn-start\\.sh"))
+      ] | length
+    ' "${fixture_file}")"
+    if [[ "${start_nudge_count}" -ne 1 ]]; then
+      fail ".hooks.UserPromptSubmit should contain exactly 1 notify-claude-turn-start.sh entry, found ${start_nudge_count}"
+      return
+    fi
+    pass ".hooks.UserPromptSubmit references notify-claude-turn-start.sh"
+
+    # Completion notifications are Stop-only: .hooks.Notification is either
+    # absent OR contains no nudge command. The dual-hook regression would put
+    # the nudge wrapper under Notification — fail in that case.
     local notif_nudge_count
     notif_nudge_count="$(jq -r '
       [ (.hooks.Notification // [])[]
         | .hooks[]?
-        | select(.command | test("/\\.nudge/notify(-claude)?\\.sh"))
+        | select(.command | test("/\\.nudge/notify.*\\.sh"))
       ] | length
     ' "${fixture_file}")"
     if [[ "${notif_nudge_count}" -ne 0 ]]; then
@@ -167,14 +180,14 @@ scenario_a_absent_file() {
   fi
 
   # Echo line must reflect Stop-only contract.
-  if ! grep -F "Stop hook" <<<"${out}" >/dev/null; then
-    fail "from-scratch success echo does not contain 'Stop hook' substring"
+  if ! grep -F "Stop" <<<"${out}" >/dev/null || ! grep -F "UserPromptSubmit" <<<"${out}" >/dev/null; then
+    fail "from-scratch success echo does not mention both Stop and UserPromptSubmit"
     echo "---- captured output ----" >&2
     echo "${out}" >&2
     echo "-------------------------" >&2
     return
   fi
-  pass "captured stdout contains 'Stop hook'"
+  pass "captured stdout mentions Stop and UserPromptSubmit"
 
   if grep -F "Notification hooks" <<<"${out}" >/dev/null; then
     fail "from-scratch success echo still mentions 'Notification hooks' — must be Stop-only"
@@ -232,6 +245,21 @@ JSON_EOF
   fi
   pass "nudge entry appended alongside mnemos"
 
+  if command -v jq >/dev/null 2>&1; then
+    local start_nudge_count
+    start_nudge_count="$(jq -r '
+      [ (.hooks.UserPromptSubmit // [])[]
+        | .hooks[]?
+        | select(.command | test("/\\.nudge/notify-claude-turn-start\\.sh"))
+      ] | length
+    ' "${fixture_file}")"
+    if [[ "${start_nudge_count}" -ne 1 ]]; then
+      fail "expected 1 UserPromptSubmit start hook, found ${start_nudge_count}"
+      return
+    fi
+    pass "UserPromptSubmit start hook appended"
+  fi
+
   shopt -s nullglob
   local backups=( "${fixture_file}".bak.* )
   shopt -u nullglob
@@ -285,7 +313,7 @@ scenario_c_idempotent_rerun() {
   fi
 
   local count_before
-  count_before="$(grep -c -E "/.nudge/notify(-claude)?.sh" "${fixture_file}" || true)"
+  count_before="$(grep -c -E "/.nudge/notify(-claude(-turn-start)?)?.sh" "${fixture_file}" || true)"
   if [[ "${count_before}" -lt 1 ]]; then
     fail "first run did not produce any /.nudge/notify(-claude).sh entry"
     return
@@ -305,7 +333,7 @@ scenario_c_idempotent_rerun() {
   fi
 
   local count_after
-  count_after="$(grep -c -E "/.nudge/notify(-claude)?.sh" "${fixture_file}" || true)"
+  count_after="$(grep -c -E "/.nudge/notify(-claude(-turn-start)?)?.sh" "${fixture_file}" || true)"
   if [[ "${count_after}" -ne "${count_before}" ]]; then
     fail "second run added a duplicate (before=${count_before}, after=${count_after})"
     return
@@ -492,7 +520,7 @@ JSON_EOF
   notif_nudge_count="$(jq -r '
     [ (.hooks.Notification // [])[]
       | .hooks[]?
-      | select(.command | test("/\\.nudge/notify(-claude)?\\.sh"))
+      | select(.command | test("/\\.nudge/notify.*\\.sh"))
     ] | length
   ' "${fixture_file}")"
   if [[ "${notif_nudge_count}" -ne 0 ]]; then
@@ -514,6 +542,86 @@ JSON_EOF
     return
   fi
   pass ".hooks.Stop carries the nudge wrapper (${stop_nudge_count} entry/entries)"
+
+  local start_nudge_count
+  start_nudge_count="$(jq -r '
+    [ (.hooks.UserPromptSubmit // [])[]
+      | .hooks[]?
+      | select(.command | test("/\\.nudge/notify-claude-turn-start\\.sh"))
+    ] | length
+  ' "${fixture_file}")"
+  if [[ "${start_nudge_count}" -lt 1 ]]; then
+    fail ".hooks.UserPromptSubmit is missing the start hook after wiring"
+    return
+  fi
+  pass ".hooks.UserPromptSubmit carries the start hook (${start_nudge_count} entry/entries)"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario (f) — existing nudge Stop hook but missing UserPromptSubmit start
+# hook: installer must add the missing start hook without duplicating Stop.
+# ---------------------------------------------------------------------------
+scenario_f_adds_missing_start_hook() {
+  echo "[scenario f] existing Stop nudge hook -> add missing UserPromptSubmit start hook"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "  SKIP: jq not on PATH (this scenario asserts jq-driven hook merge)"
+    return
+  fi
+
+  local home_dir
+  home_dir="$(make_fixture_home)"
+  local fixture_file="${home_dir}/.claude/settings.json"
+
+  cat > "${fixture_file}" <<JSON_EOF
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${home_dir}/.nudge/notify-claude.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+JSON_EOF
+
+  if ! run_install_wire "${home_dir}" >/dev/null 2>&1; then
+    fail "install.sh --wire-claude exited non-zero"
+    return
+  fi
+
+  local stop_nudge_count
+  stop_nudge_count="$(jq -r '
+    [ (.hooks.Stop // [])[]
+      | .hooks[]?
+      | select(.command | test("/\\.nudge/notify(-claude)?\\.sh"))
+    ] | length
+  ' "${fixture_file}")"
+  if [[ "${stop_nudge_count}" -ne 1 ]]; then
+    fail "existing Stop nudge hook should not be duplicated; found ${stop_nudge_count}"
+    return
+  fi
+  pass "existing Stop nudge hook not duplicated"
+
+  local start_nudge_count
+  start_nudge_count="$(jq -r '
+    [ (.hooks.UserPromptSubmit // [])[]
+      | .hooks[]?
+      | select(.command | test("/\\.nudge/notify-claude-turn-start\\.sh"))
+    ] | length
+  ' "${fixture_file}")"
+  if [[ "${start_nudge_count}" -ne 1 ]]; then
+    fail "expected missing UserPromptSubmit start hook to be added exactly once; found ${start_nudge_count}"
+    return
+  fi
+  pass "missing UserPromptSubmit start hook added"
 }
 
 # ---------------------------------------------------------------------------
@@ -530,6 +638,7 @@ main() {
   scenario_c_idempotent_rerun
   scenario_d_jq_absent
   scenario_e_preserves_existing_notification
+  scenario_f_adds_missing_start_hook
 
   echo
   echo "Scenarios run: ${SCENARIOS_RUN}"

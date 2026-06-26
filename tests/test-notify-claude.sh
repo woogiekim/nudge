@@ -13,6 +13,7 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WRAPPER="${REPO_ROOT}/notify-claude.sh"
+START_HOOK="${REPO_ROOT}/notify-claude-turn-start.sh"
 FIXTURES="${REPO_ROOT}/tests/_fixtures"
 STUB="${FIXTURES}/notify-stub.sh"
 
@@ -58,6 +59,34 @@ count_log() {
   local logfile="$1"
   if [[ ! -f "${logfile}" ]]; then echo 0; return; fi
   wc -l < "${logfile}" | tr -d ' '
+}
+
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  elif command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$1" | python3 -c 'import hashlib,sys; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+  else
+    printf 'fallback'
+  fi
+}
+
+stamp_key_for_cwd() {
+  sha256_of "$1"
+}
+
+write_stamp_for_cwd() {
+  local home_dir="$1" cwd="$2" age_seconds="$3"
+  local key stamp_dir now ago
+  key="$(stamp_key_for_cwd "${cwd}")"
+  stamp_dir="${home_dir}/.nudge/turn-stamps"
+  mkdir -p "${stamp_dir}"
+  now="$(date +%s)"
+  ago=$((now - age_seconds))
+  printf '%s\n' "${ago}" > "${stamp_dir}/${key}"
+  printf '%s' "${stamp_dir}/${key}"
 }
 
 # ---------------------------------------------------------------------------
@@ -870,6 +899,282 @@ scenario_qa_multiple_text() {
 }
 
 # ---------------------------------------------------------------------------
+# Scenario 14 — fast-turn stamp (60s ago) -> skip, no banner, stamp consumed
+# ---------------------------------------------------------------------------
+scenario_fast_turn_stamp_skip() {
+  echo "[claude:14] stamp 60s ago + NUDGE_MIN_TURN_SEC=180 -> skip, no banner, stamp consumed"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj transcript stub_log stamp_file
+  td="$(make_tmp)"
+  proj="${td}/projFast"
+  mkdir -p "${proj}"
+  transcript="${td}/transcript.jsonl"
+  cp "${FIXTURES}/transcript-prompt-only.jsonl" "${transcript}"
+  stub_log="${td}/stub.log"
+  stamp_file="$(write_stamp_for_cwd "${td}" "${proj}" 60)"
+
+  local stdin_json
+  stdin_json="$(jq -n --arg cwd "${proj}" --arg t "${transcript}" \
+    '{cwd:$cwd, transcript_path:$t, hook_event_name:"Stop"}')"
+
+  local exit_code
+  set +e
+  HOME="${td}" \
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+  NUDGE_MIN_TURN_SEC=180 \
+    bash "${WRAPPER}" <<<"${stdin_json}" >/dev/null 2>&1
+  exit_code=$?
+  set -e
+
+  if [[ "${exit_code}" -ne 0 ]]; then
+    fail "expected exit 0 on fast-turn skip, got ${exit_code}"
+    return
+  fi
+  pass "exit 0 on fast-turn skip"
+
+  if [[ -f "${stub_log}" ]] && [[ -s "${stub_log}" ]]; then
+    fail "stub was invoked on fast-turn skip; log=$(cat "${stub_log}")"
+    return
+  fi
+  pass "no banner dispatched on fast-turn skip"
+
+  if [[ -f "${stamp_file}" ]]; then
+    fail "stamp file should have been consumed on skip path; still present at ${stamp_file}"
+    return
+  fi
+  pass "stamp file consumed on skip path"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 15 — slow-turn stamp (200s ago) -> banner sent, stamp consumed
+# ---------------------------------------------------------------------------
+scenario_slow_turn_stamp_send() {
+  echo "[claude:15] stamp 200s ago + NUDGE_MIN_TURN_SEC=180 -> banner sent, stamp consumed"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj transcript stub_log stamp_file
+  td="$(make_tmp)"
+  proj="${td}/projSlow"
+  mkdir -p "${proj}"
+  transcript="${td}/transcript.jsonl"
+  cp "${FIXTURES}/transcript-prompt-only.jsonl" "${transcript}"
+  stub_log="${td}/stub.log"
+  stamp_file="$(write_stamp_for_cwd "${td}" "${proj}" 200)"
+
+  local stdin_json
+  stdin_json="$(jq -n --arg cwd "${proj}" --arg t "${transcript}" \
+    '{cwd:$cwd, transcript_path:$t, hook_event_name:"Stop"}')"
+
+  HOME="${td}" \
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+  NUDGE_MIN_TURN_SEC=180 \
+    bash "${WRAPPER}" <<<"${stdin_json}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]] || [[ ! -s "${stub_log}" ]]; then
+    fail "expected banner for slow turn but stub log is empty"
+    return
+  fi
+  pass "banner dispatched for slow turn"
+
+  if [[ -f "${stamp_file}" ]]; then
+    fail "stamp file should have been consumed on send path; still present at ${stamp_file}"
+    return
+  fi
+  pass "stamp file consumed on send path"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 16 — no stamp -> send as before
+# ---------------------------------------------------------------------------
+scenario_no_stamp_sends() {
+  echo "[claude:16] no stamp -> banner sent (no suppression source)"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj transcript stub_log
+  td="$(make_tmp)"
+  proj="${td}/projNoStamp"
+  mkdir -p "${proj}"
+  transcript="${td}/transcript.jsonl"
+  cp "${FIXTURES}/transcript-prompt-only.jsonl" "${transcript}"
+  stub_log="${td}/stub.log"
+
+  local stdin_json
+  stdin_json="$(jq -n --arg cwd "${proj}" --arg t "${transcript}" \
+    '{cwd:$cwd, transcript_path:$t, hook_event_name:"Stop"}')"
+
+  HOME="${td}" \
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+  NUDGE_MIN_TURN_SEC=180 \
+    bash "${WRAPPER}" <<<"${stdin_json}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]] || [[ ! -s "${stub_log}" ]]; then
+    fail "expected banner when no elapsed source is available"
+    return
+  fi
+  pass "banner dispatched when no stamp exists"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 17 — NUDGE_MIN_TURN_SEC=0 disables suppression
+# ---------------------------------------------------------------------------
+scenario_disabled_gate_sends() {
+  echo "[claude:17] NUDGE_MIN_TURN_SEC=0 + 60s stamp -> banner sent"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj transcript stub_log
+  td="$(make_tmp)"
+  proj="${td}/projDisabled"
+  mkdir -p "${proj}"
+  transcript="${td}/transcript.jsonl"
+  cp "${FIXTURES}/transcript-prompt-only.jsonl" "${transcript}"
+  stub_log="${td}/stub.log"
+  write_stamp_for_cwd "${td}" "${proj}" 60 >/dev/null
+
+  local stdin_json
+  stdin_json="$(jq -n --arg cwd "${proj}" --arg t "${transcript}" \
+    '{cwd:$cwd, transcript_path:$t, hook_event_name:"Stop"}')"
+
+  HOME="${td}" \
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+  NUDGE_MIN_TURN_SEC=0 \
+    bash "${WRAPPER}" <<<"${stdin_json}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]] || [[ ! -s "${stub_log}" ]]; then
+    fail "expected banner when NUDGE_MIN_TURN_SEC=0 disables suppression"
+    return
+  fi
+  pass "banner dispatched when suppression is disabled"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 18 — Notification hook events are not completion-suppressed
+# ---------------------------------------------------------------------------
+scenario_notification_event_not_suppressed() {
+  echo "[claude:18] Notification event + fast stamp -> high-priority banner still sent"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj stub_log
+  td="$(make_tmp)"
+  proj="${td}/projNotification"
+  mkdir -p "${proj}"
+  stub_log="${td}/stub.log"
+  write_stamp_for_cwd "${td}" "${proj}" 60 >/dev/null
+
+  local stdin_json
+  stdin_json="$(jq -n --arg cwd "${proj}" \
+    '{cwd:$cwd, hook_event_name:"Notification", message:"Waiting for your input"}')"
+
+  HOME="${td}" \
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+  NUDGE_MIN_TURN_SEC=180 \
+    bash "${WRAPPER}" <<<"${stdin_json}" >/dev/null 2>&1 || true
+
+  if [[ ! -f "${stub_log}" ]] || [[ ! -s "${stub_log}" ]]; then
+    fail "expected Notification event to send even with a fast-turn stamp"
+    return
+  fi
+  pass "Notification event dispatched"
+
+  local priority
+  priority="$(read_last_log "${stub_log}" priority)"
+  if [[ "${priority}" != "high" ]]; then
+    fail "expected Notification priority high, got '${priority}'"
+    return
+  fi
+  pass "Notification priority remains high"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 19 — Claude UserPromptSubmit hook writes a start stamp
+# ---------------------------------------------------------------------------
+scenario_turn_start_writes_stamp() {
+  echo "[claude:19] UserPromptSubmit hook writes a turn-start stamp"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj key stamp_file before after
+  td="$(make_tmp)"
+  proj="${td}/projStart"
+  mkdir -p "${proj}"
+  key="$(stamp_key_for_cwd "${proj}")"
+  stamp_file="${td}/.nudge/turn-stamps/${key}"
+  before="$(date +%s)"
+
+  local stdin_json
+  stdin_json="$(jq -n --arg cwd "${proj}" '{cwd:$cwd, hook_event_name:"UserPromptSubmit"}')"
+
+  HOME="${td}" bash "${START_HOOK}" <<<"${stdin_json}" >/dev/null 2>&1 || true
+  after="$(date +%s)"
+
+  if [[ ! -f "${stamp_file}" ]]; then
+    fail "expected start stamp at ${stamp_file}"
+    return
+  fi
+  pass "start stamp file created"
+
+  local stamped
+  stamped="$(cat "${stamp_file}" 2>/dev/null || true)"
+  if ! [[ "${stamped}" =~ ^[0-9]+$ ]]; then
+    fail "stamp content is not numeric epoch: '${stamped}'"
+    return
+  fi
+  if [[ "${stamped}" -lt "${before}" || "${stamped}" -gt "${after}" ]]; then
+    fail "stamp epoch ${stamped} outside expected range ${before}..${after}"
+    return
+  fi
+  pass "stamp content is current epoch seconds"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 20 — start + stop with the same session_id share a stamp key
+# ---------------------------------------------------------------------------
+scenario_session_scoped_start_then_stop_skip() {
+  echo "[claude:20] UserPromptSubmit + Stop with same session_id -> fast turn skipped"
+  SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
+
+  local td proj transcript stub_log
+  td="$(make_tmp)"
+  proj="${td}/projSession"
+  mkdir -p "${proj}"
+  transcript="${td}/transcript.jsonl"
+  cp "${FIXTURES}/transcript-prompt-only.jsonl" "${transcript}"
+  stub_log="${td}/stub.log"
+
+  local start_json stop_json
+  start_json="$(jq -n --arg cwd "${proj}" '{cwd:$cwd, session_id:"session-fast", hook_event_name:"UserPromptSubmit"}')"
+  stop_json="$(jq -n --arg cwd "${proj}" --arg t "${transcript}" \
+    '{cwd:$cwd, transcript_path:$t, session_id:"session-fast", hook_event_name:"Stop"}')"
+
+  HOME="${td}" bash "${START_HOOK}" <<<"${start_json}" >/dev/null 2>&1 || true
+  local stamp_file now ago
+  stamp_file="$(find "${td}/.nudge/turn-stamps" -type f -print 2>/dev/null | head -n 1 || true)"
+  if [[ -z "${stamp_file}" ]]; then
+    fail "start hook did not create a session-scoped stamp"
+    return
+  fi
+  now="$(date +%s)"
+  ago=$((now - 60))
+  printf '%s\n' "${ago}" > "${stamp_file}"
+
+  HOME="${td}" \
+  NUDGE_NOTIFY_CMD="${STUB}" \
+  NUDGE_NOTIFY_STUB_LOG="${stub_log}" \
+  NUDGE_MIN_TURN_SEC=180 \
+    bash "${WRAPPER}" <<<"${stop_json}" >/dev/null 2>&1 || true
+
+  if [[ -f "${stub_log}" ]] && [[ -s "${stub_log}" ]]; then
+    fail "expected same-session fast turn to skip, but stub was invoked: $(cat "${stub_log}")"
+    return
+  fi
+  pass "same-session fast turn skipped"
+}
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 main() {
@@ -899,6 +1204,13 @@ main() {
   scenario_qa_text_end
   scenario_qa_tool_end
   scenario_qa_multiple_text
+  scenario_fast_turn_stamp_skip
+  scenario_slow_turn_stamp_send
+  scenario_no_stamp_sends
+  scenario_disabled_gate_sends
+  scenario_notification_event_not_suppressed
+  scenario_turn_start_writes_stamp
+  scenario_session_scoped_start_then_stop_skip
 
   echo
   echo "Scenarios run: ${SCENARIOS_RUN}"

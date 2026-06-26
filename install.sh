@@ -144,6 +144,7 @@ wire_claude_settings() {
   local settings_file="${NUDGE_CLAUDE_SETTINGS:-${HOME}/.claude/settings.json}"
   local wrapper_path="${HOME}/.nudge/notify-claude.sh"
   local stop_cmd="${wrapper_path}"
+  local start_cmd="${HOME}/.nudge/notify-claude-turn-start.sh"
 
   local manual_snippet_path="${SRC_DIR}/examples/claude-code.settings.json"
   local restart_notice="==> Claude Code reads settings.json at session start — restart your Claude Code session to load the new hooks."
@@ -168,9 +169,8 @@ wire_claude_settings() {
     return 0
   fi
 
-  # Missing file: create a minimal valid settings.json with the Stop hook only.
-  # Stop-only contract: a Claude turn fires Stop once and (separately) Notification;
-  # wiring the nudge wrapper into both produces a duplicate banner per turn.
+  # Missing file: create a minimal valid settings.json with completion + start
+  # hooks. Notification remains untouched to avoid duplicate completion banners.
   if [[ ! -f "${settings_file}" ]]; then
     mkdir -p "$(dirname "${settings_file}")"
     local tmp_create
@@ -178,8 +178,12 @@ wire_claude_settings() {
     trap 'rm -f "${tmp_create}"' RETURN
     jq -n \
       --arg stop "${stop_cmd}" \
+      --arg start "${start_cmd}" \
       '{
         hooks: {
+          UserPromptSubmit: [
+            { matcher: "", hooks: [ { type: "command", command: $start } ] }
+          ],
           Stop: [
             { matcher: "", hooks: [ { type: "command", command: $stop } ] }
           ]
@@ -187,7 +191,7 @@ wire_claude_settings() {
       }' > "${tmp_create}"
     mv "${tmp_create}" "${settings_file}"
     trap - RETURN
-    echo "==> Created ${settings_file} with nudge Stop hook"
+    echo "==> Created ${settings_file} with nudge Stop and UserPromptSubmit hooks"
     echo "${restart_notice}"
     return 0
   fi
@@ -199,14 +203,16 @@ wire_claude_settings() {
   fi
 
   # Idempotency probe: does .hooks.Stop already contain a notify-claude.sh or
-  # legacy /.nudge/notify.sh command? Either form counts as "already wired".
+  # legacy /.nudge/notify.sh command, and does UserPromptSubmit contain the
+  # start-stamp hook?
   # Stop-only contract: the probe ignores .hooks.Notification — pre-existing
   # non-nudge Notification entries are preserved verbatim by the merge below.
-  local has_stop
+  local has_stop has_start
   has_stop="$(jq '[.hooks.Stop[]?.hooks[]?.command // empty] | map(select(test("/\\.nudge/notify(-claude)?\\.sh"))) | length > 0' "${settings_file}")"
+  has_start="$(jq '[.hooks.UserPromptSubmit[]?.hooks[]?.command // empty] | map(select(test("/\\.nudge/notify-claude-turn-start\\.sh"))) | length > 0' "${settings_file}")"
 
-  if [[ "${has_stop}" == "true" ]]; then
-    echo "==> ${settings_file} already wired for nudge — no changes made"
+  if [[ "${has_stop}" == "true" && "${has_start}" == "true" ]]; then
+    echo "==> ${settings_file} already wired for nudge Stop and UserPromptSubmit — no changes made"
     return 0
   fi
 
@@ -222,16 +228,34 @@ wire_claude_settings() {
 
   jq \
     --arg stop "${stop_cmd}" \
+    --arg start "${start_cmd}" \
     '
-    .hooks = ((.hooks // {}) | (
-      .Stop = ((.Stop // []) + [ { matcher: "", hooks: [ { type: "command", command: $stop } ] } ])
-    ))
+    .hooks = ((.hooks // {}) |
+      def has_stop:
+        ([.Stop[]?.hooks[]?.command // empty]
+         | map(select(test("/\\.nudge/notify(-claude)?\\.sh")))
+         | length) > 0;
+      def has_start:
+        ([.UserPromptSubmit[]?.hooks[]?.command // empty]
+         | map(select(test("/\\.nudge/notify-claude-turn-start\\.sh")))
+         | length) > 0;
+      (if has_start then .
+       else .UserPromptSubmit = ((.UserPromptSubmit // []) + [
+         { matcher: "", hooks: [ { type: "command", command: $start } ] }
+       ])
+       end)
+      | (if has_stop then .
+         else .Stop = ((.Stop // []) + [
+           { matcher: "", hooks: [ { type: "command", command: $stop } ] }
+         ])
+         end)
+    )
     ' "${settings_file}" > "${tmp_merge}"
 
   mv "${tmp_merge}" "${settings_file}"
   trap - RETURN
 
-  echo "==> Merged nudge hooks into ${settings_file}"
+  echo "==> Merged nudge Stop/UserPromptSubmit hooks into ${settings_file}"
   echo "${restart_notice}"
 }
 
@@ -802,7 +826,7 @@ echo "==> Installing nudge to ${INSTALL_DIR}"
 mkdir -p "${INSTALL_DIR}"
 
 # Canonical files installed by the core copy loop.
-NUDGE_CORE_SCRIPTS=(notify.sh notify-claude.sh notify-codex.sh notify-codex-turn-start.sh notify-gemini.sh notify-mac.sh _nudge_lib.sh test.sh)
+NUDGE_CORE_SCRIPTS=(notify.sh notify-claude.sh notify-claude-turn-start.sh notify-codex.sh notify-codex-turn-start.sh notify-gemini.sh notify-mac.sh _nudge_lib.sh test.sh)
 
 # Sibling-presence detection: when running from a local checkout, the canonical
 # sibling files sit next to install.sh. Under `curl ... | bash`, BASH_SOURCE[0]
@@ -827,8 +851,8 @@ else
   done
 fi
 
-# Copy core + all per-tool wrappers + shared lib + macOS notifier + Codex
-# UserPromptSubmit hook.
+# Copy core + all per-tool wrappers + shared lib + macOS notifier + turn-start
+# hooks.
 for src in "${NUDGE_CORE_SCRIPTS[@]}"; do
   if [[ -f "${STAGE_DIR}/${src}" ]]; then
     cp "${STAGE_DIR}/${src}" "${INSTALL_DIR}/${src}"

@@ -7,8 +7,8 @@
 #                              No fetcher is invoked. Installed files match
 #                              the local sources.
 #   (b) Siblings ABSENT      — self-fetch mode: NUDGE_FETCH_CMD stub is invoked
-#                              exactly 8 times (7 .sh + .env.example); each URL
-#                              starts with ${NUDGE_RAW_BASE_URL}/; all 7 scripts
+#                              once per core script plus .env.example; each URL
+#                              starts with ${NUDGE_RAW_BASE_URL}/; all scripts
 #                              land in INSTALL_DIR and are chmod +x.
 #   (c) Failed download      — stub exits non-zero (or writes empty) for one
 #                              specific URL; install.sh exits non-zero and
@@ -64,12 +64,13 @@ mkroot() {
   printf '%s' "${d}"
 }
 
-# The 8 sibling .sh files the install loop copies, plus .env.example.
+# The sibling .sh files the install loop copies, plus .env.example.
 # Spec: prd.md § F4 — test.sh MUST be part of NUDGE_CORE_SCRIPTS so it
 # lands at ~/.nudge/test.sh in both clone and self-fetch installs.
 SIBLING_SCRIPTS=(
   "notify.sh"
   "notify-claude.sh"
+  "notify-claude-turn-start.sh"
   "notify-codex.sh"
   "notify-codex-turn-start.sh"
   "notify-gemini.sh"
@@ -242,14 +243,16 @@ scenario_a_siblings_present_no_fetch() {
 }
 
 # ---------------------------------------------------------------------------
-# Scenario B — siblings ABSENT → self-fetch invoked exactly 9 times with
-# URLs prefixed by NUDGE_RAW_BASE_URL/; all 8 scripts installed and +x.
+# Scenario B — siblings ABSENT → self-fetch invoked once per script plus
+# .env.example with URLs prefixed by NUDGE_RAW_BASE_URL/; all scripts installed
+# and +x.
 #
-# Spec: prd.md § F4 — test.sh is part of NUDGE_CORE_SCRIPTS, so the count
-# becomes 9 (8 .sh + .env.example) and one fetched URL ends in "/test.sh".
+# Spec: prd.md § F4 — test.sh is part of NUDGE_CORE_SCRIPTS, so one fetched
+# URL ends in "/test.sh".
 # ---------------------------------------------------------------------------
 scenario_b_siblings_absent_self_fetch() {
-  echo "=== Scenario B: siblings ABSENT → 9 fetches (8 scripts + .env.example) ==="
+  local expected_fetches=$(( ${#SIBLING_SCRIPTS[@]} + 1 ))
+  echo "=== Scenario B: siblings ABSENT → ${expected_fetches} fetches (${#SIBLING_SCRIPTS[@]} scripts + .env.example) ==="
   SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
 
   local root home_dir src_dir stub_dir calls_log counter_file
@@ -284,10 +287,10 @@ scenario_b_siblings_absent_self_fetch() {
 
   local invocations
   invocations="$(counter_value "${counter_file}")"
-  if [[ "${invocations}" -eq 9 ]]; then
-    pass "B fetch stub invoked exactly 9 times (8 scripts + .env.example)"
+  if [[ "${invocations}" -eq "${expected_fetches}" ]]; then
+    pass "B fetch stub invoked exactly ${expected_fetches} times (${#SIBLING_SCRIPTS[@]} scripts + .env.example)"
   else
-    fail "B fetch stub invoked ${invocations} time(s); expected 9"
+    fail "B fetch stub invoked ${invocations} time(s); expected ${expected_fetches}"
     if [[ -f "${calls_log}" ]]; then
       echo "    --- recorded fetch calls ---" >&2
       sed 's/^/    /' "${calls_log}" >&2
@@ -508,10 +511,11 @@ scenario_d_stdin_bash_source_safe() {
 
   local invocations
   invocations="$(counter_value "${counter_file}")"
-  if [[ "${invocations}" -eq 9 ]]; then
-    pass "D self-fetch still fetched 9 files"
+  local expected_fetches=$(( ${#SIBLING_SCRIPTS[@]} + 1 ))
+  if [[ "${invocations}" -eq "${expected_fetches}" ]]; then
+    pass "D self-fetch still fetched ${expected_fetches} files"
   else
-    fail "D fetched ${invocations} file(s); expected 9"
+    fail "D fetched ${invocations} file(s); expected ${expected_fetches}"
   fi
 }
 
